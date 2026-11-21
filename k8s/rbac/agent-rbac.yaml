@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeops
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeops-copilot
+  namespace: kubeops
+automountServiceAccountToken: false
+---
+# 에이전트는 이 노드 정보로 로컬 kind 실습인지 확인한다.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeops-copilot-lab-node
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    resourceNames: ["datacenterusedaws-control-plane"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeops-copilot-lab-node
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeops-copilot-lab-node
+subjects:
+  - kind: ServiceAccount
+    name: kubeops-copilot
+    namespace: kubeops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubeops-copilot-operator
+  namespace: demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events", "services"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["api", "web"]
+    verbs: ["patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["api", "web"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubeops-copilot-operator
+  namespace: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubeops-copilot-operator
+subjects:
+  - kind: ServiceAccount
+    name: kubeops-copilot
+    namespace: kubeops

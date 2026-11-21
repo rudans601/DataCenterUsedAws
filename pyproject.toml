@@ -1,0 +1,27 @@
+[project]
+name = "kubeops-copilot"
+version = "0.1.0"
+description = "데이터 센터 Kubernetes 통합 운영 지원 AI Agent (강원대 클라우드캡스톤디자인2, 돈까스단)"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "langgraph>=0.4",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.3",
+    "azure-identity>=1.19",
+    "kubernetes>=31.0",
+    "requests>=2.32",
+    "streamlit>=1.40",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+kubeops = "kubeops_copilot.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kubeops_copilot"]

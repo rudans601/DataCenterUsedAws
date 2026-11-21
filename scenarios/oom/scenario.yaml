@@ -1,0 +1,8 @@
+name: oom
+title: 메모리 부족 (OOMKilled)
+question: "새로 배포한 api Pod가 자꾸 죽어. 왜 그런지 알려줘."
+wait_seconds: 60
+expected:
+  category: oom
+  target: api
+  actions: [rollback, manual]

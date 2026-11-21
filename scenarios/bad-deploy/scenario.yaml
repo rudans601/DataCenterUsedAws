@@ -1,0 +1,8 @@
+name: bad-deploy
+title: 배포 후 상태 확인 (성능 저하)
+question: "방금 api 새 버전 배포했는데 상태 괜찮아? 응답이 좀 느려진 것 같기도 하고."
+wait_seconds: 90
+expected:
+  category: bad_deploy
+  target: api
+  actions: [rollback]

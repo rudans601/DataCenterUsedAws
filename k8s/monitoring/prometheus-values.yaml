@@ -1,0 +1,29 @@
+# prometheus-community/prometheus 차트 값 (실습용 경량 구성)
+alertmanager:
+  enabled: false
+prometheus-pushgateway:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+kube-state-metrics:
+  enabled: true
+# 설정 자동 리로드 사이드카는 ARM(Apple Silicon)용 이미지가 없어 끈다.
+configmapReload:
+  prometheus:
+    enabled: false
+server:
+  global:
+    scrape_interval: 15s
+    evaluation_interval: 15s
+  retention: 2d
+  persistentVolume:
+    enabled: false
+  service:
+    type: NodePort
+    nodePort: 30090
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi

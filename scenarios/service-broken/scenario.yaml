@@ -1,0 +1,8 @@
+name: service-broken
+title: Service 연결 장애
+question: "web에서 api 호출이 전부 실패하고 있어. Pod는 멀쩡해 보이는데 뭐가 문제야?"
+wait_seconds: 60
+expected:
+  category: service_misconfig
+  target: api
+  actions: [manual]

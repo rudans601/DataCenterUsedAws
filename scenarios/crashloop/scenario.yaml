@@ -1,0 +1,8 @@
+name: crashloop
+title: Pod 반복 재시작
+question: "api 배포하고 나서 Pod가 계속 재시작되는 것 같아. 원인이 뭐고 어떻게 해야 해?"
+wait_seconds: 60
+expected:
+  category: crashloop
+  target: api
+  actions: [rollback]

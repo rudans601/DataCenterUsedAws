@@ -1,0 +1,8 @@
+name: high-load
+title: 부하 증가에 따른 성능 변화와 증설 판단
+question: "api 응답이 느려진 것 같아. 원인이 뭐고 자원 증설이 필요해?"
+wait_seconds: 90
+expected:
+  category: high_load
+  target: api
+  actions: [scale]

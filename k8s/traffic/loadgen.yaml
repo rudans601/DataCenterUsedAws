@@ -1,0 +1,61 @@
+# 평상시 트래픽을 만드는 부하 생성기 (fortio).
+# high-load 시나리오는 loadgen-api의 인자와 replicas를 바꿔 부하를 키운다.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen-api
+  namespace: traffic
+  labels:
+    app: loadgen-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen-api
+  template:
+    metadata:
+      labels:
+        app: loadgen-api
+    spec:
+      containers:
+        - name: fortio
+          image: fortio/fortio:1.76.0
+          imagePullPolicy: IfNotPresent
+          args: ["load", "-quiet", "-qps", "20", "-c", "2", "-t", "0", "http://api.demo.svc.cluster.local:9898/"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen-web
+  namespace: traffic
+  labels:
+    app: loadgen-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loadgen-web
+  template:
+    metadata:
+      labels:
+        app: loadgen-web
+    spec:
+      containers:
+        - name: fortio
+          image: fortio/fortio:1.76.0
+          imagePullPolicy: IfNotPresent
+          args: ["load", "-quiet", "-qps", "10", "-c", "2", "-t", "0", "-payload", "ping", "http://web.demo.svc.cluster.local:9898/api/echo"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

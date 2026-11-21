@@ -1,0 +1,34 @@
+# 단일 로컬 클러스터. 앱은 수동 Sync로만 반영한다.
+dex:
+  enabled: false
+applicationSet:
+  replicas: 0
+notifications:
+  enabled: false
+configs:
+  cm:
+    timeout.reconciliation: 60s
+    timeout.reconciliation.jitter: 10s
+  params:
+    controller.status.processors: "2"
+    controller.operation.processors: "1"
+  rbac:
+    policy.default: role:readonly
+controller:
+  readinessProbe: {timeoutSeconds: 5}
+  livenessProbe: {timeoutSeconds: 5, failureThreshold: 6}
+  resources:
+    limits: {cpu: 600m}
+    requests: {cpu: 100m, memory: 128Mi}
+repoServer:
+  readinessProbe: {timeoutSeconds: 5}
+  livenessProbe: {timeoutSeconds: 5, failureThreshold: 6}
+  resources:
+    limits: {cpu: 500m}
+    requests: {cpu: 50m, memory: 96Mi}
+server:
+  readinessProbe: {timeoutSeconds: 5}
+  livenessProbe: {timeoutSeconds: 5, failureThreshold: 6}
+  resources:
+    limits: {cpu: 400m}
+    requests: {cpu: 50m, memory: 96Mi}

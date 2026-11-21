@@ -1,0 +1,8 @@
+name: probe-fail
+title: Probe 실패
+question: "api 배포가 끝나질 않아. 새 Pod가 Ready가 안 되는데 왜 그래?"
+wait_seconds: 50
+expected:
+  category: probe_failure
+  target: api
+  actions: [rollback]

@@ -1,0 +1,9 @@
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
+address = "127.0.0.1"
+
+[client]
+showErrorDetails = "none"

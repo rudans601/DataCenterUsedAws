@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: kubeops-demo
+  namespace: argocd
+spec:
+  description: 로컬 실습의 demo Deployment와 Service 배포 기준
+  sourceRepos:
+    - https://github.com/rudans601/DataCenterUsedAws.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: demo
+  clusterResourceBlacklist:
+    - group: '*'
+      kind: '*'
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: ''
+      kind: Service
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kubeops-demo
+  namespace: argocd
+spec:
+  project: kubeops-demo
+  source:
+    repoURL: https://github.com/rudans601/DataCenterUsedAws.git
+    targetRevision: main
+    path: k8s/demo
+    directory:
+      include: '{api.yaml,web.yaml}'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy:
+    automated:
+      enabled: false
+      selfHeal: false
+      prune: false

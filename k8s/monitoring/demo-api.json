@@ -1,0 +1,615 @@
+{
+  "uid": "kubeops-demo-api",
+  "title": "KubeOps · API 장애 전후",
+  "tags": [
+    "kubeops",
+    "demo"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "15s",
+      "30s",
+      "1m",
+      "5m"
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "API 응답 시간 · p95",
+      "description": "최근 2분간 앱에서 처리한 요청의 95번째 백분위수. 빨간 선은 로컬 실습 기준 300ms.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kubeops-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1000 * histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace=\"demo\",app=\"api\",path!~\"healthz|readyz|metrics\"}[2m])))",
+          "legendFormat": "p95",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "API 서버 오류율 · 5xx",
+      "description": "앱에 도달한 요청의 최근 2분 비율. Service 앞에서 끊긴 연결이나 요청이 없는 구간은 독립 HTTP 실측에서 확인한다.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kubeops-prom"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "((sum(rate(http_request_duration_seconds_count{namespace=\"demo\",app=\"api\",path!~\"healthz|readyz|metrics\",status=~\"5..\"}[2m])) or (0 * sum(rate(http_request_duration_seconds_count{namespace=\"demo\",app=\"api\",path!~\"healthz|readyz|metrics\"}[2m])))) / sum(rate(http_request_duration_seconds_count{namespace=\"demo\",app=\"api\",path!~\"healthz|readyz|metrics\"}[2m])))",
+          "legendFormat": "5xx 비율",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "API 요청량",
+      "description": "Pod가 수신한 요청 수의 2분 평균. 헬스체크와 메트릭 수집 요청을 제외한다.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kubeops-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(http_request_duration_seconds_count{namespace=\"demo\",app=\"api\",path!~\"healthz|readyz|metrics\"}[2m]))",
+          "legendFormat": "요청/초",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "준비된 Pod와 Service 연결 대상",
+      "description": "Ready Pod가 살아 있어도 Service의 Ready 엔드포인트가 0이면 요청을 받을 대상이 없다. EndpointSlice가 관측될 때만 빈 대상을 0으로 표시한다.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kubeops-prom"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "lineInterpolation": "stepAfter"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(kube_deployment_spec_replicas{namespace=\"demo\",deployment=\"api\",service=\"prometheus-kube-state-metrics\"})",
+          "legendFormat": "원하는 Pod",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max(kube_deployment_status_replicas_ready{namespace=\"demo\",deployment=\"api\",service=\"prometheus-kube-state-metrics\"})",
+          "legendFormat": "Ready Pod",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(kube_endpointslice_endpoints{namespace=\"demo\",endpointslice=~\"api-[a-z0-9]+\",service=\"prometheus-kube-state-metrics\",ready=\"true\"}) or (0 * max(kube_endpointslice_info{namespace=\"demo\",endpointslice=~\"api-[a-z0-9]+\",service=\"prometheus-kube-state-metrics\"}))",
+          "legendFormat": "Ready 엔드포인트",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "컨테이너 재시작",
+      "description": "각 Pod의 누적 재시작 횟수. 새 Pod는 새 시계열로 시작한다.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kubeops-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "lineInterpolation": "stepAfter"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (pod) (kube_pod_container_status_restarts_total{namespace=\"demo\",pod=~\"api-[a-z0-9]+-[a-z0-9]+\",container=\"podinfo\"})",
+          "legendFormat": "{{pod}}",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "요청 지표 수집 상태",
+      "description": "현재 검색된 API Pod 중 Prometheus가 스크레이프에 성공한 대상 수. Ready Pod가 있는데 값이 사라지면 지표 수집 설정을 확인한다.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kubeops-prom"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "off"
+            },
+            "lineInterpolation": "stepAfter"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(up{namespace=\"demo\",job=\"kubernetes-pods\",app=\"api\"})",
+          "legendFormat": "수집 성공",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Pod별 CPU 사용량",
+      "description": "2분 평균 CPU 사용량. 1,000m은 CPU 코어 1개다.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kubeops-prom"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix: m",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1000 * sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"demo\",pod=~\"api-[a-z0-9]+-[a-z0-9]+\",container=\"podinfo\"}[2m]))",
+          "legendFormat": "{{pod}}",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Pod별 메모리 사용량",
+      "description": "컨테이너가 사용 중인 working set. Pod 교체 전후를 비교할 수 있다.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kubeops-prom"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 6,
+            "spanNulls": false,
+            "showPoints": "auto",
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (pod) (container_memory_working_set_bytes{namespace=\"demo\",pod=~\"api-[a-z0-9]+-[a-z0-9]+\",container=\"podinfo\"})",
+          "legendFormat": "{{pod}}",
+          "range": true,
+          "instant": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kubeops-prom"
+          }
+        }
+      ]
+    }
+  ]
+}

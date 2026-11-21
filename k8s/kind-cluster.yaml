@@ -1,0 +1,22 @@
+# 데이터 센터 Kubernetes를 흉내 낸 로컬 테스트 클러스터 (GPU 없음)
+# control-plane 1대 + worker 2대
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: datacenterusedaws
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # web 데모 서비스 (NodePort 30080 -> http://localhost:8080)
+      - containerPort: 30080
+        hostPort: 8080
+        listenAddress: "127.0.0.1"
+      # Prometheus (NodePort 30090 -> http://localhost:9090)
+      - containerPort: 30090
+        hostPort: 9090
+        listenAddress: "127.0.0.1"
+  - role: worker
+    labels:
+      rack: rack-a
+  - role: worker
+    labels:
+      rack: rack-b

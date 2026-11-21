@@ -1,0 +1,23 @@
+# 실행 시 생성되는 파일
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+.kube/
+data/
+/eval/results/
+.DS_Store
+.ruff_cache/
+
+.cache/
+knowledge/candidates/
+*.kubeconfig
+*.pem
+*.key
+*.p12
+*.pfx
+id_ed25519
+id_rsa
+.streamlit/secrets.toml

@@ -1,0 +1,8 @@
+name: normal
+title: 정상 상태 점검
+question: "지금 demo 서비스들 상태 어때? 문제 있는 거 있어?"
+wait_seconds: 20
+expected:
+  category: none
+  target: ""
+  actions: [none]
