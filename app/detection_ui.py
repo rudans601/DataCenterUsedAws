@@ -10,6 +10,7 @@ import streamlit as st
 from app.observation_ui import replay_upload, show_saved
 
 from app.incidents_ui import show_timeline
+from app.scenario_ui import lab_busy, run_local
 from kubeops_copilot import incidents, request_safety
 from kubeops_copilot.triage import IMPACTS, ROUTES
 from kubeops_copilot.detection import CELLS, LABELS, PROTOCOL, LEGACY_PROTOCOL, bucket, decision_matrix, experiment_impact, report_rows, statistics, severity_statistics, handoff_counts
@@ -61,6 +62,9 @@ def show_rows(rows):
             st.caption(reason)
             if row.get("target_tier"):
                 st.caption(f"100회 계획 시드 {row['campaign_seed']} · {row['trial']}회차 · 목표 {IMPACTS[row['target_tier']]}")
+            if posthoc := row.get("posthoc_prediction"):
+                judged_at = datetime.fromisoformat(posthoc["at"]).strftime("%Y-%m-%d %H:%M")
+                st.caption(f"저장된 근거로 사후 판정 · {posthoc['model']} · {judged_at} · 당시 앱 재시도로 종료")
             if check := row.get("recheck"):
                 st.write("재측정 결과", {"held": "보류 지속", "error": "측정·재판정 오류", "resolved": "판단 확정"}[check["status"]])
                 st.json(check, expanded=False)
@@ -76,7 +80,10 @@ def show_rows(rows):
                 if row.get("citation"):
                     st.write(row["citation"]["quote"])
                     st.caption(f"런북 v{row.get('runbook_version')} · " + (row.get("citation_source") or "원문 인용 확인 실패"))
-                st.write("에이전트 조치 결과 · " + row.get("recovery_outcome", "미실행"))
+                if row.get("judgement_only"):
+                    st.caption("판정 전용 회차 · 모델의 제안을 채점했습니다.")
+                elif not row.get("posthoc_prediction"):
+                    st.write("에이전트 조치 결과 · " + row.get("recovery_outcome", "미실행"))
                 if row.get("effective_route") == "handoff" or row.get("recovery_outcome") in {"복구 실패", "부분 개선", "검증 불가", "실행 실패"}:
                     st.write(row.get("root_cause") or row.get("diagnosis", ""))
                     for step in row.get("manual_steps", []):
@@ -123,6 +130,35 @@ def show_rows(rows):
 ACTION_NAMES = {"none": "관찰", "manual": "사람 처리", "rollback": "롤백", "restart": "재시작", "scale": "복제본 조정"}
 
 
+def show_campaign(rows, directory):
+    first = rows[0]
+    planned = first.get("campaign_planned_counts") or {}
+    measured = Counter(r["case"] for r in rows if r.get("measurement_status") == "complete")
+    judged = Counter(r["case"] for r in rows if r.get("prediction_status") == "complete")
+    posthoc = sum(bool(r.get("posthoc_prediction")) for r in rows)
+    st.markdown("#### 100회 평가 진행")
+    st.write(f"기록 {len(rows)}/100회 · 실측 완료 {sum(measured.values())}회 · "
+             f"에이전트 판정 완료 {sum(judged.values())}회" + (f" (사후 판정 {posthoc}회 포함)" if posthoc else "") +
+             f" · 실측한 시나리오 {len(measured)}종")
+    st.caption(f"이 실행 전체 기준 · 시드 {first['campaign_seed']} · 목표 " +
+               " / ".join(f"{IMPACTS[k]} {n}회" for k, n in first["campaign_mix"].items()))
+    with st.expander("시나리오별 계획과 판정 건수"):
+        recorded = Counter(r["case"] for r in rows)
+        st.dataframe([{"시나리오": label, "계획": planned.get(name, 0) if planned else None,
+                       "기록": recorded[name], "실측 완료": measured[name], "에이전트 판정 완료": judged[name]}
+                      for name, label in NAMES.items() if name in planned or name in recorded], hide_index=True)
+    last = rows[-1]
+    retryable = last.get("measurement_status") in ("failed", "timeout", "interrupted", "started") and not last.get("prediction")
+    if (first["environment"] == "eks" and os.getenv("KUBEOPS_EKS_VERIFIED_ENDPOINT")
+            and first.get("cluster_created_at") == os.getenv("KUBEOPS_EKS_CREATED_AT")
+            and st.get_option("server.address") in {"127.0.0.1", "localhost", "::1"} and (len(rows) < 100 or retryable)):
+        disabled = "lab_run" in st.session_state or lab_busy()
+        label = "남은 회차 실측 이어서 실행" if first["fixtures_only"] else "남은 회차 모델 판정 이어서 실행"
+        if st.button(label, disabled=disabled, help="기존 보고서에 저장합니다. 모델 판정을 켠 평가는 남은 호출 비용이 발생합니다."):
+            run_local(resume=directory / first["report"])
+            st.rerun()
+
+
 def show_decisions(rows):
     for field, title, labels in [("impact", "위험 등급", IMPACTS), ("route", "처리 방식", ROUTES), ("action", "조치 선택", ACTION_NAMES)]:
         pairs, missing = decision_matrix(rows, field)
@@ -137,13 +173,15 @@ def show_decisions(rows):
     judged = [r for r in rows if r.get("prediction_status") == "complete"]
     if judged:
         st.caption(f"현행 런북 원문 인용 확인 {sum(bool(r.get('citation_source')) for r in judged)}/{len(judged)}건")
+    records = [r for r in rows if not r.get("fixtures_only") and not r.get("mode") and not r.get("judgement_only")]
+    if not records:
+        return
     st.markdown("#### 실제 복구 결과")
-    records = [r for r in rows if not r.get("fixtures_only") and not r.get("mode")]
     checked = [r for r in records if r.get("app_checks")]
     if checked:
-        st.write(f"앱 1차 처리 {len(checked)}건 · 앱 복구로 종결 {sum(r.get('prediction_status') == 'app_recovered' for r in checked)}건 · "
+        st.write(f"앱 1차 처리 {len(checked)}건 · 앱 복구로 종결 {sum(r.get('recovered_by') == 'app' for r in checked)}건 · "
                  f"에이전트 진단 요청 {sum(any(e['action']=='에이전트 진단 요청' for e in r.get('timeline', [])) for r in checked)}건")
-    counts = Counter(("앱 1차 처리" if r.get("prediction_status") == "app_recovered" else r.get("effective_route", "미판정"),
+    counts = Counter(("앱 1차 처리" if r.get("recovered_by") == "app" else r.get("effective_route", "미판정"),
                       r.get("recovery_outcome", "미실행")) for r in records)
     if counts:
         outcomes = list(dict.fromkeys(outcome for _, outcome in counts))
@@ -241,6 +279,10 @@ def render(directory):
                                   format_func=lambda s: s.removeprefix("detection-").removesuffix(".json"), key="cm_run")
     selected = [r for r in rows if (report == "전체" or r["report"] == report) and (case == "전체" or r["case"] == case) and
                 (seed == "전체" or r["seed"] == seed) and (model == "전체" or r["model"] == model)]
+    campaign_files = {r["report"] for r in rows if r.get("campaign_mix") and report in ("전체", r["report"])}
+    if len(campaign_files) == 1:
+        campaign_file = next(iter(campaign_files))
+        show_campaign([r for r in rows if r["report"] == campaign_file], directory)
     counts, metrics = statistics(selected)
     cols = st.columns(3)
     for i, (name, rate) in enumerate(metrics.items()):
@@ -266,9 +308,6 @@ def render(directory):
         st.write(f"실측 장애 {len(measured_incidents)}건 중 장애로 판정 {counts['TP']}건 · 정상으로 판정 {counts['FN']}건 · "
                  f"판단 보류 {held}건" + (f" · 기타 미완료 {unresolved}건" if unresolved else ""))
     if protocol == PROTOCOL:
-        if report != "전체" and (campaign := next((r for r in rows if r["report"] == report and r.get("campaign_mix")), None)):
-            st.caption(f"100회 목표 · 계획 시드 {campaign['campaign_seed']} · " +
-                       " / ".join(f"{IMPACTS[k]} {n}건" for k, n in campaign["campaign_mix"].items()))
         show_tier_metrics(selected)
         show_decisions(selected)
     choices = ["전체", *CELLS, *sorted(other)]

@@ -1,4 +1,5 @@
 """단일 실험의 독립 HTTP 표본과 모델 출력으로 서비스 장애 탐지 성적을 집계한다."""
+from collections import Counter
 import json
 import math
 
@@ -93,12 +94,13 @@ def report_rows(directory, environment=None):
             continue
         if doc.get("protocol") not in {LEGACY_PROTOCOL, PROTOCOL}:
             continue
+        planned = Counter(c["case"] for c in doc.get("campaign_plan", ()))
         for row in doc["cases"]:
             rows.append({**row, "environment": doc.get("environment", "kind"), "cluster_created_at": doc.get("cluster_created_at"), "protocol": doc["protocol"], "corpus_revision": doc.get("corpus_revision"),
                          "prompt_version": doc.get("prompt_version"), "runbook_version": doc.get("runbook_version"), "report": path.name,
                          "workload_reference_version": doc.get("workload_reference_version"),
                          "seed": row.get("trial_seed", doc["seed"]), "campaign_seed": doc["seed"] if doc.get("campaign_mix") else None,
-                         "campaign_mix": doc.get("campaign_mix"), "started": doc["started"],
+                         "campaign_planned_counts": planned, "campaign_mix": doc.get("campaign_mix"), "started": doc["started"],
                          "model": doc["model"], "fixtures_only": doc["fixtures_only"]})
     return rows
 
@@ -123,7 +125,6 @@ def bucket(row):
 
 
 def decision_matrix(rows, field):
-    from collections import Counter
     pairs = Counter()
     missing = 0
     prediction_key = {"impact": "model_impact", "route": "model_route", "action": "proposed_action"}[field]
@@ -150,7 +151,6 @@ def decision_matrix(rows, field):
 
 def handoff_counts(rows):
     """최종 보류와 실제 사람 인계 티켓을 사건 단위로 짝짓는다."""
-    from collections import Counter
     counts = Counter()
     for row in rows:
         if row.get("fixtures_only") or row.get("measurement_status") != "complete":
@@ -181,7 +181,6 @@ def severity_statistics(rows):
 
 
 def statistics(rows):
-    from collections import Counter
     counts = Counter(bucket(row) for row in rows)
     tp, fn, fp, tn = (counts[key] for key in CELLS)
     def ratio(a, b):

@@ -27,7 +27,7 @@ from eval.mentoring import PROBE_CLIENT, confirmed, observe, probe, wait_sample
 from kubeops_copilot import first_response, graph, incidents, k8s_tools, metrics, rag
 from kubeops_copilot.config import settings
 from kubeops_copilot.detection import PROTOCOL, ground_truth
-from kubeops_copilot.campaign import campaign_plan, DEFAULT_MIX
+from kubeops_copilot.campaign import campaign_plan, DEFAULT_MIX, validate_mix
 from eval.remediation_score import REFERENCE_VERSION, reference_decision, recovery_outcome
 from kubeops_copilot.scenarios import EKS_NAMES, single_plan
 from kubeops_copilot import control_replay
@@ -349,6 +349,9 @@ def assess_and_act(row, evidence, snapshot, stack, approver, approval_dir, origi
                findings=a["findings"], citation=a["runbook_citation"], citation_source=a["citation_source"],
                cited_procedures=a["cited_procedures"],
                documents=[{k: d.get(k) for k in ("id", "source", "title", "version", "matched_events")} for d in state["docs"]])
+    if row.get("judgement_only"):
+        row["agent_case_id"] = graph.report(state)["case_id"]
+        return
     p = state["guard"]["normalized"]
     if route in ("approval", "auto") and (p["namespace"], p["deployment"]) != ("demo", "api"):
         row["execution_status"] = "시험 대상 범위 밖"
@@ -490,17 +493,17 @@ def evaluate(case, row, fixtures_only, approver, manual, approval_dir=None):
                                        "load_ends" if case["case"] == "high-load" else "fixture")
                 if fixtures_only:
                     continue
-                if app_resolved(row["app_checks"], samples, row["direct_readings"]):
+                if not row.get("judgement_only") and app_resolved(row["app_checks"], samples, row["direct_readings"]):
                     row.update(prediction_status="app_recovered", recovered_by="app", recovery_outcome="앱 요청 복구")
                     continue
                 incidents.record(row["incident_id"], "agent-intake", "시스템", "에이전트 진단 요청",
                                  "앱 요청 결과와 클러스터의 관측값을 함께 전달했습니다.")
                 load_pod = None
-                if c["recovery"] == "hold_load":
+                if not row.get("judgement_only") and c["recovery"] == "hold_load":
                     load_pod = episode.enter_context(verification_load(case["qps"]))
                     row["verification_load_qps"] = case["qps"]
                 assess_and_act(row, evidence, snapshot, episode, approver, approval_dir, original, load_pod)
-                if manual and row.get("effective_route") == "handoff" and resource("svc")["spec"]["selector"] != selector:
+                if manual and not row.get("judgement_only") and row.get("effective_route") == "handoff" and resource("svc")["spec"]["selector"] != selector:
                     print("복원 대기 · demo/api Service selector를 복원 · " + json.dumps(selector), flush=True)
                     end = time.monotonic() + 120
                     while time.monotonic() < end:
@@ -539,8 +542,45 @@ def validate_target(server, agent_server):
         raise RuntimeError("실험 실행기와 에이전트의 클러스터 주소가 다릅니다.")
 
 
-def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=None, stop_file=None):
-    cases = choose_cases(seed, choice, mix)
+def save_report(path, report):
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, suffix=".tmp", delete=False) as temp:
+        json.dump(report, temp, ensure_ascii=False, indent=2)
+    Path(temp.name).replace(path)
+
+
+def resume_campaign(path, expected):
+    report = json.loads(path.read_text())
+    if not report.get("campaign_mix") or any(report.get(k) != v for k, v in expected.items()):
+        raise ValueError("같은 클러스터·모델·채점 버전으로 실행한 100회 보고서를 선택하세요.")
+    rows = report["cases"]
+    if len(rows) > 100 or any(r.get("trial") != i for i, r in enumerate(rows, 1)):
+        raise ValueError("회차가 연속된 100회 평가 기록이 필요합니다.")
+    prior_attempts = report.get("previous_attempts") or []
+    if (rows and rows[-1].get("measurement_status") in ("failed", "timeout", "interrupted", "started")
+            and not rows[-1].get("prediction")):
+        report.setdefault("previous_attempts", []).append(rows.pop())
+    if len(rows) == 100:
+        raise ValueError("이미 100회가 모두 기록되었습니다.")
+    mix = report["campaign_mix"]
+    validate_mix(mix, EKS_LAB)
+    cases = report.get("campaign_plan")
+    if cases is None:
+        cases = campaign_plan(report["seed"], mix, EKS_LAB, completed=rows)
+    else:
+        # 처음 이어갈 때 고정한 구버전 회차 수를 이용해 같은 계획을 다시 검증한다.
+        fixed = report.get("campaign_fixed_prefix", prior_attempts[0]["trial"] - 1 if prior_attempts else 0)
+        if type(fixed) is not int or not 0 <= fixed <= len(rows):
+            raise ValueError("저장된 계획의 고정 회차 수가 올바르지 않습니다.")
+        if cases != campaign_plan(report["seed"], mix, EKS_LAB, completed=rows[:fixed]):
+            raise ValueError("저장된 계획과 시드로 재현한 계획이 다릅니다.")
+    if any(any(row.get(k) != v for k, v in case.items()) for row, case in zip(rows, cases)):
+        raise ValueError("완료된 회차와 저장된 계획이 일치하지 않습니다.")
+    if "campaign_plan" not in report:
+        report["campaign_fixed_prefix"] = len(rows)
+    return report, cases
+
+
+def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=None, stop_file=None, resume=None):
     server = kubectl("config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}")
     validate_target(server, k8s_tools.api_client().configuration.host)
     directory = ROOT / "eval" / "results"
@@ -548,21 +588,37 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
     with (ROOT / ".kube" / "mentoring.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         started = datetime.now().astimezone()
-        path = directory / f"detection-{started:%Y%m%d-%H%M%S-%f}.json"
-        report = {"environment": "eks" if EKS_LAB else "kind", "protocol": PROTOCOL, "started": started.isoformat(), "seed": seed, "model": settings.llm_model,
-                  "fixtures_only": fixtures_only, "runbook_version": rag.RUNBOOK_VERSION, "corpus_revision": rag.corpus_revision(),
-                  "prompt_version": graph.PROMPT_VERSION, "cases": []}
-        if any(case.get("mode") != control_replay.MODE for case in cases):
-            report["workload_reference_version"] = REFERENCE_VERSION
+        metadata = {"environment": "eks" if EKS_LAB else "kind", "protocol": PROTOCOL, "model": settings.llm_model,
+                    "runbook_version": rag.RUNBOOK_VERSION, "corpus_revision": rag.corpus_revision(), "prompt_version": graph.PROMPT_VERSION}
         if EKS_LAB:
-            report["cluster_created_at"] = os.getenv("KUBEOPS_EKS_CREATED_AT")
+            metadata["cluster_created_at"] = os.environ["KUBEOPS_EKS_CREATED_AT"]
+        if resume is not None:
+            path = resume.resolve()
+            if path.parent != directory.resolve() or not path.match("detection-*.json"):
+                raise ValueError("eval/results 안의 단일 평가 보고서를 지정하세요.")
+            report, cases = resume_campaign(path, {**metadata, "workload_reference_version": REFERENCE_VERSION})
+            choice = "campaign"
+            fixtures_only = report["fixtures_only"]
+        else:
+            cases = choose_cases(seed, choice, mix)
+            path = directory / f"detection-{started:%Y%m%d-%H%M%S-%f}.json"
+            report = {**metadata, "started": started.isoformat(), "seed": seed, "fixtures_only": fixtures_only, "cases": []}
+            if any(case.get("mode") != control_replay.MODE for case in cases):
+                report["workload_reference_version"] = REFERENCE_VERSION
+            if choice == "campaign":
+                report["campaign_mix"] = DEFAULT_MIX if mix is None else mix
+                report["campaign_fixed_prefix"] = 0
+        offset = len(report["cases"])
         if choice == "campaign":
-            report["campaign_mix"] = DEFAULT_MIX if mix is None else mix
-        for index, case in enumerate(cases, 1):
+            report["campaign_plan"] = cases
+            save_report(path, report)
+        for index, case in enumerate(cases[offset:], offset + 1):
             if stop_file and stop_file.exists():
                 break
             print(f"단계 · {index}/{len(cases)}회", flush=True)
             row = {**case, "incident_id": uuid4().hex}
+            if choice == "campaign" and not fixtures_only:
+                row["judgement_only"] = True
             report["cases"].append(row)
             print("실행", case["case"], flush=True)
             print("사건", row["incident_id"], flush=True)
@@ -608,9 +664,7 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
                                 window["http_score"] = ground_truth(window["http_samples"])
                         except (RuntimeError, subprocess.SubprocessError, ValueError, OSError) as exc:
                             row["observer_read_error"] = type(exc).__name__
-                temp = path.with_suffix(".tmp")
-                temp.write_text(json.dumps(report, ensure_ascii=False, indent=2))
-                temp.replace(path)
+                save_report(path, report)
             if row.get("cleanup_error") or (row.get("error") and row.get("measurement_status") == "complete"):
                 break
         print("REPORT", path.name, flush=True)
@@ -630,7 +684,10 @@ if __name__ == "__main__":
     parser.add_argument("--approval-dir", type=Path, help="이번 실행의 운영자 승인 응답 폴더")
     parser.add_argument("--mix", type=int, nargs=4, metavar=("정상", "주의", "장애", "중대"), help="100회 목표 비율")
     parser.add_argument("--stop-file", type=Path, help="현재 사건 정리 후 다음 사건을 시작하지 않을 신호 파일")
+    parser.add_argument("--resume", type=Path, help="기존 100회 보고서의 다음 회차부터 재개")
     args = parser.parse_args()
+    if args.resume and (args.plan or args.mix or args.approve or args.wait_operator or args.approval_dir or args.fixtures_only or args.case != "batch"):
+        parser.error("--resume은 기존 보고서에 저장된 계획과 모델 사용 설정을 따릅니다.")
     mix = dict(zip(DEFAULT_MIX, args.mix)) if args.mix is not None else None
     if mix is not None and (args.case != "campaign" or min(args.mix) < 0 or sum(args.mix) != 100):
         parser.error("--mix는 campaign에서 사용하며 합계가 100인 음이 아닌 네 정수를 지정합니다.")
@@ -641,4 +698,4 @@ if __name__ == "__main__":
     def stop(signum, frame):
         raise KeyboardInterrupt("실습 중지")
     signal.signal(signal.SIGTERM, stop)
-    raise SystemExit(run(args.seed, args.case, args.fixtures_only, args.approve, args.wait_operator, args.approval_dir, mix, args.stop_file))
+    raise SystemExit(run(args.seed, args.case, args.fixtures_only, args.approve, args.wait_operator, args.approval_dir, mix, args.stop_file, args.resume))

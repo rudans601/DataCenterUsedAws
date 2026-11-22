@@ -1,4 +1,5 @@
 """로컬 장애 사례 생성과 실측 기록을 표시하는 Streamlit 탭."""
+import fcntl
 import json
 import os
 import secrets
@@ -106,18 +107,31 @@ def show_report(report):
                 st.caption(f"조치 이력 #{row['agent_case_id']}")
 
 
-def run_local(seed, case, diagnose, manual, mix=None):
+def lab_busy():
+    try:
+        with (ROOT / ".kube" / "mentoring.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    return False
+
+
+def run_local(seed=None, case=None, diagnose=True, manual=False, mix=None, *, resume=None):
     work = tempfile.TemporaryDirectory(prefix=("eks-experiment-" if os.getenv("KUBEOPS_EKS_LAB") == "1" else "experiment-"), dir=ROOT / ".kube")
     directory = Path(work.name)
-    args = [sys.executable, str(ROOT / "eval" / "single_detection.py"), "--seed", str(seed), "--case", case]
-    if mix is None:
-        args.extend(["--approval-dir", str(directory)])
+    args = [sys.executable, str(ROOT / "eval" / "single_detection.py")]
+    if resume is not None:
+        args.extend(["--resume", str(resume), "--stop-file", str(directory / "stop")])
     else:
-        args.extend(["--mix", *(str(mix[t]) for t in DEFAULT_MIX), "--stop-file", str(directory / "stop")])
-    if not diagnose:
-        args.append("--fixtures-only")
-    if manual:
-        args.append("--wait-operator")
+        args.extend(["--seed", str(seed), "--case", case])
+        if mix is None:
+            args.extend(["--approval-dir", str(directory)])
+        else:
+            args.extend(["--mix", *(str(mix[t]) for t in DEFAULT_MIX), "--stop-file", str(directory / "stop")])
+        if not diagnose:
+            args.append("--fixtures-only")
+        if manual:
+            args.append("--wait-operator")
     with (directory / "progress").open("w") as log:
         process = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True)
     st.session_state.lab_run = (work, process)
@@ -132,6 +146,8 @@ def live_experiment():
     if process.poll() is not None:
         reports = [line[7:] for line in lines if line.startswith("REPORT ")]
         message = ("실험 완료" if process.returncode == 0 else "실험 미완료") + (" · " + reports[-1] if reports else "")
+        if any(line.startswith("ValueError: ") for line in lines):
+            message = next(line.removeprefix("ValueError: ") for line in reversed(lines) if line.startswith("ValueError: "))
         if any("BlockingIOError" in line for line in lines):
             message = "이미 다른 실험이 같은 클러스터를 사용 중입니다."
         st.session_state.lab_result = message
@@ -178,13 +194,18 @@ def render():
     seed = c2.number_input("재현용 시드", min_value=0, max_value=2**31-1, value=42, key="generator_seed")
     c3.button("새 시드", on_click=new_seed)
     mix = None
+    preview = None
+    valid = True
     if selected == "campaign":
         cols = st.columns(4)
         mix = {t: col.number_input(f"{IMPACTS[t]} (%)", min_value=0, max_value=100, value=v, key="mix_" + t)
                for col, (t, v) in zip(cols, DEFAULT_MIX.items())}
-        if sum(mix.values()) != 100:
-            st.warning("목표 비율의 합계를 100으로 맞춰 주세요.")
-    if st.button("상황 생성", type="primary", disabled=mix is not None and sum(mix.values()) != 100):
+        try:
+            preview = campaign_plan(seed, mix, eks)
+        except ValueError as exc:
+            st.warning(str(exc))
+            valid = False
+    if st.button("상황 생성", type="primary", disabled=not valid):
         cases = single_plan(seed, eks)
         if selected == "campaign":
             case = {"case": selected, "mix": mix}
@@ -195,16 +216,24 @@ def render():
         else:
             case = next(c for c in cases if c["case"] == selected)
         st.session_state["generated_single_scenario"] = (seed, case)
-    if generated := st.session_state.get("generated_single_scenario"):
+    generated = st.session_state.get("generated_single_scenario")
+    if generated and generated[1]["case"] == "campaign":
+        saved_seed, saved_case = generated
+        try:
+            planned = (preview if preview and saved_seed == seed and saved_case["mix"] == mix
+                       else campaign_plan(saved_seed, saved_case["mix"], eks))
+        except ValueError as exc:
+            st.warning(f"저장된 계획을 다시 생성하세요. {exc}")
+            generated = None
+    if generated:
         saved_seed, case = generated
         name = case["case"]
         lab_enabled = os.getenv("KUBEOPS_LOCAL_LAB") == "1" or os.getenv("KUBEOPS_EKS_LAB") == "1"
         local = lab_enabled and st.get_option("server.address") in {"127.0.0.1", "localhost", "::1"}
         batch = name == "batch"
         if name == "campaign":
-            planned = campaign_plan(saved_seed, case["mix"], eks)
             st.markdown("#### 등급 비율별 100회 평가")
-            st.caption(f"계획 시드 {saved_seed} · 서로 다른 사건 시드 100개 · 실측 등급은 실행 후 결정됩니다.")
+            st.caption(f"계획 시드 {saved_seed} · {len({c['case'] for c in planned})}종 · 서로 다른 사건 시드 100개 · 실측 등급은 실행 후 결정됩니다.")
             with st.expander("100회 실행 계획"):
                 st.dataframe([{"회차": c["trial"], "시드": c["trial_seed"], "목표 등급": IMPACTS[c["target_tier"]],
                                "상황": names[c["case"]]} for c in planned], hide_index=True)
@@ -228,12 +257,13 @@ def render():
             button = batch_title + " 실행" if batch else ("관측 기록 재생" if case.get("mode") else "이 상황을 실습 클러스터에서 재현")
             if name == "campaign":
                 button = "100회 실습 평가 실행"
-                st.caption("장시간 순차 실행하며 진단을 켜면 모델 호출 비용이 발생합니다. 무인 평가에서는 승인 변경을 실행하지 않습니다. 매 회차 결과를 저장합니다.")
+                st.caption("진단을 켜면 매 회차 모델이 위험 등급과 처리 방식을 판정하며 모델 호출 비용이 발생합니다. 사람의 승인이나 직접 복구를 기다리지 않고 회차별 판정을 혼동행렬에 저장합니다.")
             if st.button(button,
                          disabled="lab_run" in st.session_state):
                 run_local(saved_seed, name, diagnose, manual, case.get("mix"))
                 st.session_state.pop("lab_result", None)
-            st.caption("진단을 켜면 주입 중의 관측과 런북으로 담당자를 결정합니다. 승인 요청은 제안 내용을 확인한 뒤 응답하세요.")
+            if name != "campaign":
+                st.caption("진단을 켜면 주입 중의 관측과 런북으로 담당자를 결정합니다. 승인 요청은 제안 내용을 확인한 뒤 응답하세요.")
     if "lab_run" in st.session_state:
         live_experiment()
     elif result := st.session_state.get("lab_result"):
