@@ -3,4 +3,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CTX=kind-datacenterusedaws
-k() { kubectl --kubeconfig "$ROOT/.kube/admin.kubeconfig" --context "$CTX" "$@"; }
+CFG="$ROOT/.kube/admin.kubeconfig"
+if [[ "${KUBEOPS_EKS_LAB:-0}" == 1 ]]; then
+  CTX=datacenterusedaws-lab
+  CFG="$ROOT/.kube/eks-admin.kubeconfig"
+fi
+k() { kubectl --kubeconfig "$CFG" --context "$CTX" "$@"; }

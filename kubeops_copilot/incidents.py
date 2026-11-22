@@ -43,7 +43,7 @@ def record_echo(incident, cycle, receipt):
                    "요청 실행" if step["attempt"] == 1 else "같은 요청 재시도",
                    f"{step['at']} · {step['detail']} · {step['ms']}ms", db)
         outcome = receipt["outcome"]
-        label = {"healthy": "첫 요청 정상", "recovered": "재시도 후 응답 본문 확인", "escalated": "앱 복구 실패 · 진단 요청"}
+        label = {"healthy": "첫 요청 정상", "recovered": "재시도 후 응답 본문 확인", "escalated": "재시도 후 요청 실패"}
         record(incident, f"echo-result-{cycle}", "앱", label[outcome], "demo/web → demo/api echo", db)
 
 

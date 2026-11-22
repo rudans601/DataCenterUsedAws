@@ -8,15 +8,24 @@
 """
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.web_target import configure
+
+EKS = configure()
+
+from app import eks_inventory
 from app.incidents_ui import demo_app, inbox, show_timeline
 from kubeops_copilot import incidents
 from app.scenario_ui import RESULTS, render as render_scenarios
@@ -68,9 +77,29 @@ def connection_status() -> dict:
     return out
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def worker_inventory():
+    return eks_inventory.inventory()
+
+
 with st.sidebar:
     st.title("☸️ KubeOps Copilot")
     st.caption("데이터 센터 Kubernetes 통합 운영 지원 AI Agent")
+    if EKS:
+        st.subheader("AWS 서울 · EKS")
+        st.code(eks_inventory.CLUSTER)
+        if not os.getenv("KUBEOPS_EKS_VERIFIED_ENDPOINT"):
+            st.warning("EKS 실시간 연결을 기다리고 있습니다.")
+            st.caption("저장된 AWS 실측 결과는 아래에서 확인할 수 있습니다.")
+
+if EKS and not os.getenv("KUBEOPS_EKS_VERIFIED_ENDPOINT"):
+    st.header("EKS 실측 기록")
+    st.info("실시간 조회는 전용 클러스터 연결 후 사용할 수 있습니다.")
+    render_detection(RESULTS)
+    st.stop()
+
+
+with st.sidebar:
     status = connection_status()
     for key, label in [("k8s", "Kubernetes"), ("prom", "Prometheus"), ("llm", settings.llm_provider)]:
         ok, detail = status[key]
@@ -81,16 +110,17 @@ with st.sidebar:
     for action in sorted(policy.allowed_actions):
         st.markdown(f"- {policy.descriptions[action]}")
     st.caption(f"대상: demo/{', demo/'.join(sorted(policy.allowed_deployments))} · "
-               f"복제본 {policy.min_replicas}~{policy.max_replicas}개 · 로컬 demo/api는 런북의 제한 자동 조치 허용")
+               f"복제본 {policy.min_replicas}~{policy.max_replicas}개")
     st.divider()
     with st.expander("위험 등급과 처리 기준"):
         st.write("정상은 대표 요청과 서비스 상태가 안정적인 경우, 주의는 서비스가 응답하지만 이상 신호가 있는 경우입니다. "
                  "실패율 5% 또는 p95 300ms를 초과하면 장애입니다. 연속된 요청 구간이 전부 실패하고 "
                  "연결 가능한 Pod가 없으면 중대 장애입니다. 근거가 부족하면 판단을 보류합니다.")
-        st.write("에이전트가 조회한 근거와 런북 v2의 원문을 연결해 각 사건의 등급과 담당자를 판단합니다.")
+        st.write(f"에이전트가 조회한 근거와 런북 v{rag.RUNBOOK_VERSION}의 원문을 연결해 각 사건의 등급과 담당자를 판단합니다.")
         st.markdown("**앱 1차 복구**  \n같은 echo 요청을 한 번 재시도하고 응답 내용을 확인합니다. 실패가 계속되거나 클러스터에 다른 이상이 남으면 에이전트가 검토합니다.")
         st.markdown("**자동 관찰**  \n대표 요청이 안정적이거나 경고가 일시적이면 추가 표본을 확인합니다.")
-        st.markdown("**제한 자동 조치**  \n로컬 demo/api의 지속 부하에 +1 증설, 또는 기존 버전이 정상인 실패 리비전 롤백. 전용 절차의 조건을 실행 직전 다시 확인합니다.")
+        if not EKS:
+            st.markdown("**제한 자동 조치**  \n로컬 demo/api의 지속 부하에 +1 증설, 또는 기존 버전이 정상인 실패 리비전 롤백. 전용 절차의 조건을 실행 직전 다시 확인합니다.")
         st.markdown("**운영자 승인 후 실행**  \n허용된 변경의 대상, 근거, 영향과 위험을 제시하고 승인을 기다립니다.")
         st.markdown("**사람이 직접 처리**  \n비용 발생 가능성, 권한 밖 변경, 근거 부족, 복구 미확인 시 티켓을 발급합니다. 운영자가 접수해 조치와 결과를 기록합니다.")
     st.markdown("**예시 질문**")
@@ -238,7 +268,7 @@ def run_question(question: str) -> None:
 
 # ---------------------------------------------------------------- 탭
 tab_chat, tab_scenarios, tab_matrix, tab_cluster, tab_actions = st.tabs(
-    ["Copilot", "상황 생성기", "혼동행렬", "클러스터 현황", "조치"]
+    ["Copilot", "상황 생성기", "혼동행렬", "EKS · EC2 현황" if EKS else "클러스터 현황", "조치"]
 )
 with tab_cluster:
     tab_overview, tab_operations, tab_history = st.tabs(["현황", "상세 모니터링 (Grafana)", "조치 이력"])
@@ -274,9 +304,26 @@ with tab_chat:
         except Exception as exc:
             st.error(f"에이전트 처리를 마치지 못했습니다 ({type(exc).__name__}). 조치 → 티켓·알림에서 확인하세요.")
 
-with tab_overview:
+@st.fragment(run_every="30s" if EKS else None)
+def render_overview():
+    if EKS:
+        checked = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%H:%M:%S")
+        st.caption(f"최근 조회 {checked} KST · 30초마다 갱신")
     if st.button("새로고침"):
         st.cache_data.clear()
+        st.rerun()
+    if EKS:
+        st.subheader("EC2 워커")
+        try:
+            fleet = worker_inventory()
+            st.caption(f"{eks_inventory.REGION} · EKS {fleet['version']} ({fleet['status']}) · "
+                       f"{eks_inventory.NODE_GROUP} ({fleet['group_status']}) · 목표 {fleet['desired']}대")
+            if fleet["workers"]:
+                st.dataframe(fleet["workers"], hide_index=True)
+            else:
+                st.info("관리형 노드 그룹에 조회되는 EC2 인스턴스가 없습니다.")
+        except (KeyError, ValueError, OSError, subprocess.SubprocessError):
+            st.warning("AWS에서 워커를 조회하지 못했습니다. AWS CLI 세션 및 EKS·EC2 조회 권한을 확인하세요.")
     try:
         ns = settings.namespace
         deps = k8s_tools.list_deployments(ns)
@@ -309,7 +356,14 @@ with tab_overview:
             "일치 Pod": s["matching_pods"], "Ready 엔드포인트": s["ready_endpoints"],
         } for s in k8s_tools.service_status(ns)]), hide_index=True, use_container_width=True)
     except Exception as e:  # noqa: BLE001
-        st.error(f"클러스터 정보를 가져오지 못했어요: {e}")
+        if EKS:
+            st.warning("EKS의 워크로드를 조회하지 못했습니다. AWS 로그인과 클러스터 연결 상태를 확인하세요.")
+        else:
+            st.error(f"클러스터 정보를 가져오지 못했어요: {e}")
+
+
+with tab_overview:
+    render_overview()
 
 with tab_history:
     cases = audit.list_cases(200)

@@ -20,7 +20,7 @@ class MentoringTests(unittest.TestCase):
         checked = {"normalized": proposal, "executable": action not in ("none", "manual"),
                    "allowed": action not in ("none", "manual"), "target_version": self.version}
         analysis = {"confidence": "high", "service_detection": "incident" if impact == "degraded" else "normal", "proposal": proposal, "route": route, "impact": impact,
-                    "target_grounded": True, "cited_procedures": [f"{route}.{action}"], "citation_source": "knowledge/runbooks/v2/release-latency.md",
+                    "target_grounded": True, "cited_procedures": [f"{route}.{action}"], "citation_source": "knowledge/runbooks/v3/release-latency.md",
                     "decision_reason": "관측과 런북 대조", **kwargs}
         return triage.classify(self.snapshot, analysis, checked, local=True)
 
@@ -94,7 +94,7 @@ class MentoringTests(unittest.TestCase):
         self.snapshot["recovery_facts"] = {"previous_p95_ms": 450, "spare_worker": True}
         source = triage.AUTO_PROCEDURES["scale"]
         def decide():
-            return self.decision("scale", "auto", "degraded", citation_source="knowledge/runbooks/v2/" + source)
+            return self.decision("scale", "auto", "degraded", citation_source="knowledge/runbooks/v3/" + source)
         self.assertEqual(graph._after_guard({"triage": decide()}), "execute")
         self.snapshot["recovery_facts"]["previous_p95_ms"] = 25
         self.assertEqual(decide()["route"], "handoff")

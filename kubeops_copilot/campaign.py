@@ -2,6 +2,7 @@
 import random
 
 from .scenarios import single_plan
+from . import control_replay
 
 DEFAULT_MIX = {"healthy": 35, "warning": 45, "degraded": 15, "critical": 5}
 ROLLOUT_CASES = ("crashloop", "oom", "pending", "image-pull", "probe-fail", "pvc")
@@ -13,7 +14,7 @@ CANDIDATES = {
 }
 
 
-def campaign_plan(seed, mix=None):
+def campaign_plan(seed, mix=None, include_replay=False):
     mix = DEFAULT_MIX if mix is None else mix
     if (set(mix) != set(DEFAULT_MIX) or any(type(v) is not int or v < 0 for v in mix.values())
             or sum(mix.values()) != 100):
@@ -23,12 +24,15 @@ def campaign_plan(seed, mix=None):
     rng.shuffle(tiers)
     cases, used = [], set()
     for tier in tiers:
-        name = rng.choice(CANDIDATES[tier])
+        candidates = CANDIDATES[tier]
+        if include_replay and tier == "warning":
+            candidates += tuple(control_replay.NAMES)
+        name = rng.choice(candidates)
         while True:
             trial_seed = rng.randrange(2**31)
             if trial_seed in used:
                 continue
-            case = next(c for c in single_plan(trial_seed) if c["case"] == name)
+            case = next(c for c in single_plan(trial_seed, include_replay) if c["case"] == name)
             conditions = case["conditions"]
             if name in ROLLOUT_CASES and conditions["scope"] != ("api" if tier == "critical" else "new_revision"):
                 continue

@@ -1,5 +1,8 @@
 """로컬 실습 유형과 재현 가능한 생성 조건."""
 import random
+from datetime import datetime, timezone
+
+from . import control_replay
 
 # 생성기는 주입할 신호만 정의한다.
 CATALOG = {
@@ -19,6 +22,7 @@ CATALOG = {
     "pvc": ("볼륨 할당 대기", "WARN scheduler pod has unbound PersistentVolumeClaims"),
 }
 NAMES = {name: data[0] for name, data in CATALOG.items()}
+EKS_NAMES = {**NAMES, **control_replay.NAMES}
 DELAYS = {"standard": (300, 700), "slow": (550, 850)}
 
 
@@ -48,7 +52,7 @@ def plan(seed):
     return result
 
 
-def single_plan(seed):
+def single_plan(seed, include_replay=False):
     """시드에 따라 단일 유형별 재현 조건과 실행 순서를 결정한다."""
     cases = plan(seed)
     rollout_faults = {"crashloop", "oom", "probe-fail", "pending", "image-pull", "pvc"}
@@ -88,6 +92,10 @@ def single_plan(seed):
             "replicas": rng.choice([2, 3] if name == "maintenance" else [1, 2, 3]),
             "recovery": recovery,
         }
+    if include_replay:
+        order = random.Random(f"control-order-v1/{seed}")
+        for name in control_replay.NAMES:
+            cases.insert(order.randrange(len(cases) + 1), control_replay.plan_case(seed, name))
     return cases
 
 
@@ -101,6 +109,8 @@ RECOVERY = {"hold": "판단·검증 후 실험 정리", "hold_load": "같은 요
 
 
 def condition_rows(case):
+    if case.get("mode") == control_replay.MODE:
+        return control_replay.condition_rows(case)
     c = case["conditions"]
     load = f"평상시 {c['baseline_qps']} req/s"
     if case["case"] == "high-load":
@@ -115,6 +125,12 @@ def condition_rows(case):
 
 
 def single_timeline(case):
+    if case.get("mode") == control_replay.MODE:
+        window = control_replay.make_window(case, "preview", "preview", datetime(2000, 1, 2, tzinfo=timezone.utc))
+        start = control_replay.instant(window["start"])
+        return [f"+{(control_replay.instant(e['at'])-start).total_seconds():g}초  {e['stage']}  {e['target']}  "
+                + str({k: v for k, v in e.items() if k not in {"at", "stage", "target", "source", "round"}})
+                for e in window["control"]]
     c = case["conditions"]
     start = c["onset_s"]
     lines = [f"+0초  정상 준비 · 배경 요청 {c['baseline_qps']} req/s · 복제본 {c['replicas']}개"]

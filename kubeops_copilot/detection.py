@@ -52,6 +52,11 @@ def assess_impact(samples, probes, unavailable, warning):
 
 def experiment_impact(row):
     """독립 호출과 실제 주입 중 표본만 사용한다. 생성기 유형·모델 출력은 입력에서 제외한다."""
+    from .control_replay import MODE, grade
+    if row.get("mode") == MODE and row.get("observation_windows"):
+        window = row["observation_windows"][0]
+        ref = grade(window, window.get("http_samples", []))
+        return ref["impact"], ref.get("initial_finding") or ref["reason"]
     if row.get("measurement_status") != "complete" or not row.get("injected"):
         return "unknown", "실험 측정이 완료되지 않았습니다."
     s = row["injected"]
@@ -80,15 +85,18 @@ def experiment_impact(row):
     return assess_impact([s], probes, absent, warning)
 
 
-def report_rows(directory):
+def report_rows(directory, environment=None):
     rows = []
     for path in sorted(directory.glob("detection-*.json"), reverse=True):
         doc = json.loads(path.read_text())
+        if environment and doc.get("environment", "kind") != environment:
+            continue
         if doc.get("protocol") not in {LEGACY_PROTOCOL, PROTOCOL}:
             continue
         for row in doc["cases"]:
-            rows.append({**row, "protocol": doc["protocol"], "corpus_revision": doc.get("corpus_revision"),
+            rows.append({**row, "environment": doc.get("environment", "kind"), "cluster_created_at": doc.get("cluster_created_at"), "protocol": doc["protocol"], "corpus_revision": doc.get("corpus_revision"),
                          "prompt_version": doc.get("prompt_version"), "runbook_version": doc.get("runbook_version"), "report": path.name,
+                         "workload_reference_version": doc.get("workload_reference_version"),
                          "seed": row.get("trial_seed", doc["seed"]), "campaign_seed": doc["seed"] if doc.get("campaign_mix") else None,
                          "campaign_mix": doc.get("campaign_mix"), "started": doc["started"],
                          "model": doc["model"], "fixtures_only": doc["fixtures_only"]})

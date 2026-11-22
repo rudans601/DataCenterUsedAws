@@ -58,7 +58,18 @@ class EvidenceBook:
 # ---------------------------------------------------------------- 클라이언트
 @lru_cache(maxsize=1)
 def api_client() -> client.ApiClient:
-    return kconfig.new_client_from_config(config_file=settings.kubeconfig)
+    if os.getenv("KUBEOPS_EKS_LAB") == "1":
+        expected = os.getenv("KUBEOPS_EKS_VERIFIED_ENDPOINT")
+        if not expected or not expected.startswith("https://"):
+            raise RuntimeError("EKS 연결을 시작하려면 scripts/eks-lab.sh web을 실행하세요.")
+        _, active = kconfig.list_kube_config_contexts(config_file=settings.kubeconfig)
+        if not active or active["name"] != "datacenterusedaws-lab":
+            raise RuntimeError("EKS 전용 kubeconfig가 필요합니다.")
+    api = kconfig.new_client_from_config(config_file=settings.kubeconfig)
+    if os.getenv("KUBEOPS_EKS_LAB") == "1" and api.configuration.host != expected:
+        api.close()
+        raise RuntimeError("에이전트와 EKS의 주소가 다릅니다.")
+    return api
 
 
 def reset_client() -> None:

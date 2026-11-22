@@ -1,4 +1,6 @@
-"""맥북 전용 kind 실습의 제한된 변경과 복구."""
+"""프로젝트 전용 클러스터 실습의 제한된 변경과 복구."""
+from contextvars import ContextVar
+from kubeops_copilot.observations import now
 from contextlib import ExitStack, contextmanager
 import json
 import os
@@ -7,8 +9,13 @@ import subprocess
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
-KUBECTL = ("kubectl", "--kubeconfig", str(ROOT / ".kube" / "admin.kubeconfig"),
-           "--context", "kind-datacenterusedaws")
+EKS_LAB = os.getenv("KUBEOPS_EKS_LAB") == "1"
+if EKS_LAB:
+    KUBECTL = ("kubectl", "--kubeconfig", str(ROOT / ".kube" / "eks-admin.kubeconfig"),
+               "--context", "datacenterusedaws-lab")
+else:
+    KUBECTL = ("kubectl", "--kubeconfig", str(ROOT / ".kube" / "admin.kubeconfig"),
+               "--context", "kind-datacenterusedaws")
 TEMPLATE = "/spec/template"
 CONTAINER = TEMPLATE + "/spec/containers/0"
 ARGS = CONTAINER + "/args"
@@ -21,17 +28,45 @@ SCRIPT_FIELDS = {
 }
 
 
+# 평가 스레드에서만 현재 사건의 운영 API 영수증을 모은다.
+control_log = ContextVar("control_log", default=None)
+
+
+def record_control(stage, target, result, **facts):
+    log = control_log.get()
+    if log is not None:
+        log.append({"at": now(), "stage": stage, "target": target, "result": result, **facts})
+
+
 def kubectl(*args, data=None, namespace="demo"):
     limit = 155 if args[:2] == ("rollout", "status") else 25
-    proc = subprocess.run([*KUBECTL, f"--request-timeout={limit}s", "-n", namespace, *args],
-                          cwd=ROOT, input=data, text=True, capture_output=True, timeout=limit+5)
+    stage = {"get": "read", "patch": "write", "create": "write", "cordon": "write",
+             "uncordon": "write", "delete": "write"}.get(args[0])
+    target = f"{namespace} · {args[0]} {' '.join(a for a in args[1:3] if not a.startswith('-'))}".strip()
+    try:
+        proc = subprocess.run([*KUBECTL, f"--request-timeout={limit}s", "-n", namespace, *args],
+                              cwd=ROOT, input=data, text=True, capture_output=True, timeout=limit+5)
+    except subprocess.TimeoutExpired:
+        if stage:
+            record_control(stage, target, "timeout")
+        raise
     if proc.returncode:
+        error = proc.stderr.lower()
+        status = "timeout" if any(t in error for t in ("timed out", "timeout", "deadline exceeded")) else "error"
+        if stage:
+            record_control(stage, target, status)
         raise RuntimeError(f"kubectl {args[0]}: {proc.stderr.strip()[-500:]}")
+    if stage:
+        record_control(stage, target, "ok")
     return proc.stdout.strip()
 
 
 def resource(kind, name="api", ns="demo"):
-    return json.loads(kubectl("get", kind, name, "-o", "json", namespace=ns))
+    obj = json.loads(kubectl("get", kind, name, "-o", "json", namespace=ns))
+    if control_log.get() is not None and kind in {"deploy", "deployment"} and ns == "demo" and name == "api":
+        record_control("controller", "demo/api", "observed", desired=obj["spec"].get("replicas", 1),
+                       generation=obj["metadata"].get("generation"), observed_generation=obj.get("status", {}).get("observedGeneration"))
+    return obj
 
 
 def patch(target, ops, ns="demo"):
@@ -89,7 +124,11 @@ def create_owned(stack, manifest):
 
 def api_pods():
     items = json.loads(kubectl("get", "pod", "-l", "app=api", "-o", "json"))["items"]
-    return [p for p in items if not p["metadata"].get("deletionTimestamp")]
+    active = [p for p in items if not p["metadata"].get("deletionTimestamp")]
+    record_control("placement", "demo/api", "observed", pods=[
+        {"uid": p["metadata"]["uid"], "node": p["spec"].get("nodeName")} for p in active
+    ])
+    return active
 
 
 @contextmanager
@@ -108,8 +147,14 @@ def inject(case):
                 installed = save_fields(stack, target, ns, SCRIPT_FIELDS[name])
             env = {**os.environ, "KUBEOPS_DELAY_PROFILE": case.get("delay_profile", "standard"),
                    "KUBEOPS_LAB_QPS": str(case.get("qps", 2000))}
-            subprocess.run(["bash", str(ROOT / "scenarios" / name / "inject.sh")], env=env, check=True, timeout=60)
+            try:
+                subprocess.run(["bash", str(ROOT / "scenarios" / name / "inject.sh")], env=env, check=True, timeout=60)
+            except subprocess.SubprocessError as exc:
+                if name != "normal":
+                    record_control("write", f"{ns}/{target}", "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "error")
+                raise
             if name != "normal":
+                record_control("write", f"{ns}/{target}", "ok")
                 applied = resource(*target.split("/"), ns)
                 installed.update({p: value(applied, p) for p in SCRIPT_FIELDS[name]})
         elif name == "transient-warning":
@@ -124,7 +169,8 @@ def inject(case):
             details["hostname"] = (f"api.missing-{uid}.svc.cluster.local" if case.get("bad_namespace")
                                    else f"api-{uid}.demo.svc.cluster.local")
         elif name == "maintenance":
-            nodes = json.loads(kubectl("get", "nodes", "-l", "!node-role.kubernetes.io/control-plane", "-o", "json"))["items"]
+            selector = "eks.amazonaws.com/nodegroup=scenario-workers" if EKS_LAB else "!node-role.kubernetes.io/control-plane"
+            nodes = json.loads(kubectl("get", "nodes", "-l", selector, "-o", "json"))["items"]
             workers = {n["metadata"]["name"] for n in nodes if not n["spec"].get("unschedulable")}
             pods = [p for p in api_pods() if p["spec"].get("nodeName") in workers and
                     any(c["type"] == "Ready" and c["status"] == "True" for c in p["status"].get("conditions", []))]

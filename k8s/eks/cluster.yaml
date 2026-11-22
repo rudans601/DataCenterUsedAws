@@ -1,0 +1,25 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: datacenterusedaws-lab
+  region: ap-northeast-2
+  tags:
+    Project: DataCenterUsedAws
+    Purpose: scenario-lab
+autoModeConfig:
+  enabled: false
+vpc:
+  nat:
+    gateway: Disable
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+managedNodeGroups:
+  - name: scenario-workers
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 2
+    volumeSize: 20
+    disableIMDSv1: true
+    disablePodIMDS: true

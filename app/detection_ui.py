@@ -7,11 +7,13 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
+from app.observation_ui import replay_upload, show_saved
+
 from app.incidents_ui import show_timeline
 from kubeops_copilot import incidents, request_safety
 from kubeops_copilot.triage import IMPACTS, ROUTES
 from kubeops_copilot.detection import CELLS, LABELS, PROTOCOL, LEGACY_PROTOCOL, bucket, decision_matrix, experiment_impact, report_rows, statistics, severity_statistics, handoff_counts
-from kubeops_copilot.scenarios import NAMES, RECOVERY, condition_rows
+from kubeops_copilot.scenarios import EKS_NAMES as NAMES, RECOVERY, condition_rows
 
 
 def dashboard_url():
@@ -21,6 +23,9 @@ def dashboard_url():
 
 
 def dashboard_period(row):
+    if row.get("environment") == "eks" and (not row.get("cluster_created_at") or
+            row["cluster_created_at"] != os.getenv("KUBEOPS_EKS_CREATED_AT")):
+        return None
     episodes = row.get("episodes") or []
     starts = [e["injection_started"] for e in episodes if e.get("injection_started")]
     if not starts:
@@ -41,6 +46,7 @@ def show_rows(rows):
     for row in rows:
         label = f"{NAMES[row['case']]} · 시드 {row['seed']} · {row['started'][:19].replace('T', ' ')}"
         with st.expander(label):
+            show_saved(row)
             if row.get("incident_id") and not row.get("fixtures_only"):
                 events = incidents.timeline(row["incident_id"]) or row.get("timeline", [])
                 tickets = incidents.tickets(row["incident_id"]) or row.get("tickets", [])
@@ -58,10 +64,13 @@ def show_rows(rows):
             if check := row.get("recheck"):
                 st.write("재측정 결과", {"held": "보류 지속", "error": "측정·재판정 오류", "resolved": "판단 확정"}[check["status"]])
                 st.json(check, expanded=False)
+            if "route_correct" in row:
+                st.write(f"위험 등급 {'일치' if row['impact_correct'] else '불일치'} · "
+                         f"권장 처리 {'일치' if row['route_correct'] else '불일치'}")
             if row.get("model_route"):
                 ref = row.get("reference") or {}
-                st.write(f"에이전트 등급 · {IMPACTS[row['model_impact']]}　 모델 제안 · {ROUTES[row['model_route']]}　 "
-                         f"정책 적용 후 · {ROUTES[row['effective_route']]}")
+                st.write(f"에이전트 등급 · {IMPACTS[row['model_impact']]}　 모델 제안 · {ROUTES[row['model_route']]}　 " +
+                         (f"정책 적용 후 · {ROUTES[row['effective_route']]}" if row.get("effective_route") else "재생 평가"))
                 st.caption(row["decision"]["reason"])
                 st.caption(f"채점 기준 · {ROUTES.get(ref.get('route'), '미확정')} · {ref.get('reason', '')}")
                 if row.get("citation"):
@@ -76,7 +85,8 @@ def show_rows(rows):
                     st.caption(f"승인 기록 · {row['approval']['approver']} · {row['approval'].get('comment', '')}")
             st.write(f"실측 정답 **{LABELS.get(row.get('truth'), '미측정')}**　 "
                      f"에이전트 **{LABELS.get(row.get('prediction'), '미판정')}**　 · {bucket(row)}")
-            base_url = dashboard_url()
+            active_env = "eks" if os.getenv("KUBEOPS_EKS_LAB") == "1" else "kind"
+            base_url = dashboard_url() if row.get("environment", "kind") == active_env else None
             period = dashboard_period(row) if base_url else None
             if period:
                 start, last, query = period
@@ -106,7 +116,8 @@ def show_rows(rows):
             for k in ("error", "prediction_error", "cleanup_error"):
                 if row.get(k):
                     st.warning(row[k])
-            st.caption(row["model"] + " · " + row["report"])
+            mode = "실측 전용" if row["fixtures_only"] else row["model"]
+            st.caption(f"{row.get('environment', 'kind')} · {mode} · {row['report']}")
 
 
 ACTION_NAMES = {"none": "관찰", "manual": "사람 처리", "rollback": "롤백", "restart": "재시작", "scale": "복제본 조정"}
@@ -127,7 +138,7 @@ def show_decisions(rows):
     if judged:
         st.caption(f"현행 런북 원문 인용 확인 {sum(bool(r.get('citation_source')) for r in judged)}/{len(judged)}건")
     st.markdown("#### 실제 복구 결과")
-    records = [r for r in rows if not r.get("fixtures_only")]
+    records = [r for r in rows if not r.get("fixtures_only") and not r.get("mode")]
     checked = [r for r in records if r.get("app_checks")]
     if checked:
         st.write(f"앱 1차 처리 {len(checked)}건 · 앱 복구로 종결 {sum(r.get('prediction_status') == 'app_recovered' for r in checked)}건 · "
@@ -168,7 +179,8 @@ def show_tier_metrics(rows):
 
 def show_request_safety(directory):
     st.markdown("### 조치 요청 차단 평가")
-    runs = dict(request_safety.reports(directory))
+    env = "eks" if os.getenv("KUBEOPS_EKS_LAB") == "1" else "kind"
+    runs = {path: r for path, r in request_safety.reports(directory) if r.get("environment", "kind") == env}
     if not runs:
         st.caption("아직 조치 요청 차단 평가 기록이 없습니다.")
         return
@@ -200,21 +212,27 @@ def show_request_safety(directory):
 
 
 def render(directory):
+    if os.getenv("KUBEOPS_EKS_LAB") == "1":
+        replay_upload()
     st.button("평가 기록 새로고침", key="cm_refresh")
     show_request_safety(directory)
     st.subheader("서비스 장애 탐지 혼동행렬")
-    st.caption("로컬 demo/api의 단일 실험 1회가 1건입니다. 행은 독립 HTTP 실측 정답, 열은 에이전트 판정입니다.")
-    all_rows = report_rows(directory)
+    env = "eks" if os.getenv("KUBEOPS_EKS_LAB") == "1" else "kind"
+    st.caption(f"{env.upper()} demo/api의 단일 실험 1회가 1건입니다. 행은 독립 HTTP 실측 정답, 열은 에이전트 판정입니다.")
+    all_rows = report_rows(directory, environment=env)
     protocol = st.radio("평가 버전", [PROTOCOL, LEGACY_PROTOCOL], horizontal=True,
-                        format_func=lambda v: "런북 v2 · 탐지·조치·복구" if v == PROTOCOL else "기존 탐지 기록")
+                        format_func=lambda v: "탐지·조치·복구" if v == PROTOCOL else "기존 탐지 기록")
     rows = [r for r in all_rows if r["protocol"] == protocol]
     if not rows:
         st.info("아직 단일 탐지 평가 기록이 없습니다. 상황 생성기에서 에이전트 진단을 켜고 단일 실습을 실행하세요.")
         return
     if protocol == PROTOCOL:
-        versions = list(dict.fromkeys((r.get("prompt_version") or "초기", r.get("corpus_revision") or "초기") for r in rows))
-        version = st.selectbox("프롬프트·문서 버전", versions, format_func=lambda v: " · ".join(v))
-        rows = [r for r in rows if (r.get("prompt_version") or "초기", r.get("corpus_revision") or "초기") == version]
+        def version_key(row):
+            return (row.get("runbook_version") or "미기록", row.get("prompt_version") or "초기",
+                    row.get("corpus_revision") or "초기", row.get("workload_reference_version") or "워크로드 채점 버전 미기록")
+        versions = list(dict.fromkeys(version_key(r) for r in rows))
+        version = st.selectbox("런북·프롬프트·문서·채점 버전", versions, format_func=lambda v: " · ".join(v))
+        rows = [r for r in rows if version_key(r) == version]
     a, b, c, run_filter = st.columns(4)
     case = a.selectbox("상황 유형", ["전체", *NAMES], format_func=lambda v: NAMES.get(v, v), key="cm_case")
     seed = b.selectbox("평가 시드", ["전체", *sorted({r["seed"] for r in rows})], key="cm_seed")

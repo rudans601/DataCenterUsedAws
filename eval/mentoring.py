@@ -10,14 +10,18 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from kubeops_copilot import k8s_tools, metrics
-from eval.cluster_fixtures import KUBECTL, api_pods, kubectl, resource
+from kubeops_copilot import first_response, k8s_tools, metrics
+from eval.observation_capture import current_client
+from eval.cluster_fixtures import EKS_LAB, KUBECTL, api_pods, kubectl, resource
 
 # API 부하를 조정하면 loadgen-api가 교체되므로 고정된 웹 부하 생성기에서 측정한다.
 PROBE_CLIENT = "deploy/loadgen-web"
 
 
 def probe(host):
+    if EKS_LAB and host == "api.demo.svc.cluster.local":
+        sample = current_client()["client"]
+        return sample["code"], sample["ms"]
     raw = kubectl("exec", PROBE_CLIENT, "--", "fortio", "load", "-n", "1", "-c", "1", "-qps", "0",
                   "-allow-initial-errors", "-quiet", "-timeout", "2s", "-json", "-", f"http://{host}:9898/", namespace="traffic")
     result = json.loads(raw)
@@ -27,19 +31,27 @@ def probe(host):
 def observe(context=None):
     sample = k8s_tools.deployment_snapshot("demo", "api", window="2m")
     svc = next(s for s in k8s_tools.service_status("demo") if s["name"] == "api")
-    api_code, api_ms = probe("api.demo.svc.cluster.local")
-    api_observed_at = datetime.now().astimezone().isoformat()
-    start = time.monotonic()
-    try:
-        response = requests.post("http://127.0.0.1:8080/api/echo", data="kubeops-check", timeout=4)
-        code = response.status_code
-        echoed = code == 200 and response.json() == ["kubeops-check"]
-    except (requests.RequestException, ValueError):
-        code, echoed = None, False
+    if EKS_LAB:
+        report = current_client()
+        client = report["client"]
+        api_code, api_ms, api_observed_at = client["code"], client["ms"], client["at"]
+        last = report["echo"]["attempts"][-1]
+        code, echoed, echo_ms = last["status"], last["verified"], last["ms"]
+    else:
+        api_code, api_ms = probe("api.demo.svc.cluster.local")
+        api_observed_at = datetime.now().astimezone().isoformat()
+        start = time.monotonic()
+        try:
+            response = requests.post(first_response.ECHO_URL, data="kubeops-check", timeout=4)
+            code = response.status_code
+            echoed = code == 200 and response.json() == ["kubeops-check"]
+        except (requests.RequestException, ValueError):
+            code, echoed = None, False
+        echo_ms = round(1000 * (time.monotonic() - start))
     m = sample["metrics"]
     observed = {"api_observed_at": api_observed_at, "api_code": api_code, "api_ms": api_ms, "ready": sample["ready"], "desired": sample["desired"],
                 "endpoints": svc["ready_endpoints"], "http_status": code, "echo_ok": echoed,
-                "echo_ms": round(1000 * (time.monotonic() - start)), "p95_ms": m["p95_ms"],
+                "echo_ms": echo_ms, "p95_ms": m["p95_ms"],
                 "rps": m["rps"], "error_ratio": m["error_ratio"], "cpu_util": m.get("cpu_util"),
                 "throttle": m.get("throttle_ratio")}
     if context:

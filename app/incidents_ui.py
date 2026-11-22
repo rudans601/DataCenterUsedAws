@@ -1,6 +1,7 @@
 """앱 요청, 단계별 사건 기록, 운영자 티켓함."""
 import json
 import os
+import subprocess
 from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
@@ -38,7 +39,8 @@ def publish_decision(directory, request, accepted, actor):
 
 
 def experiment_request(ticket_id):
-    for path in (ROOT / ".kube").glob("experiment-*/pending.json"):
+    prefix = "eks-experiment" if os.getenv("KUBEOPS_EKS_LAB") == "1" else "experiment"
+    for path in (ROOT / ".kube").glob(f"{prefix}-*/pending.json"):
         try:
             request = json.loads(path.read_text())
         except FileNotFoundError:
@@ -53,6 +55,22 @@ def handle_demo_request(incident, message, url=first_response.ECHO_URL):
     incidents.record_echo(incident, 1, receipt)
     if receipt["outcome"] != "escalated":
         return None
+    if os.getenv("KUBEOPS_EKS_LAB") == "1" and url == first_response.ECHO_URL:
+        # 이 요청은 맥의 API 터널을 거쳤다. 터널 실패를 앱 장애 근거로 전달하지 않는다.
+        from eval.observation_capture import current_client
+        from kubeops_copilot.observations import instant
+        try:
+            sample = current_client()["echo"]
+            confirmed = (sample["outcome"] == "escalated" and
+                         instant(sample["attempts"][-1]["at"]) >= instant(receipt["attempts"][0]["at"]))
+        except (RuntimeError, OSError, subprocess.SubprocessError, KeyError, ValueError):
+            confirmed = False
+        if not confirmed:
+            incidents.record(incident, "transport", "관측", "웹 요청 경로 확인 필요",
+                             "워커의 독립 HTTP 관측에서 같은 구간의 장애를 확인하지 못했습니다.")
+            return None
+        incidents.record(incident, "independent-http", "관측", "워커의 echo 요청도 실패",
+                         sample["attempts"][-1]["at"])
     question = "demo/web에서 demo/api echo 요청의 응답을 확인하지 못했습니다. 운영 근거와 런북을 확인하고 처리해 주세요."
     incidents.record(incident, "agent-intake", "시스템", "에이전트 진단 요청", "앱 요청의 상태와 소요 시간을 전달했습니다.")
     try:
@@ -67,6 +85,16 @@ def handle_demo_request(incident, message, url=first_response.ECHO_URL):
 def demo_app():
     st.subheader("데모 앱 요청")
     st.caption("web을 통해 api로 메시지를 보내고 같은 내용이 돌아오는지 확인합니다. 일시적인 연결 오류는 한 번 재시도합니다.")
+    if os.getenv("KUBEOPS_EKS_LAB") == "1":
+        st.caption("수동 전송은 Kubernetes 터널을 사용합니다. 앱 장애 채점은 워커의 독립 HTTP 관측을 사용합니다.")
+        if st.button("워커에서 측정한 최근 HTTP 결과 조회"):
+            from eval.observation_capture import current_client
+            try:
+                item = current_client()
+                sample = item["client"]
+                st.write(f"demo/api · HTTP {sample['code'] or '응답 없음'} · {sample['ms']} ms · {sample['at']}")
+            except (RuntimeError, OSError, subprocess.SubprocessError, KeyError, ValueError):
+                st.info("관측 로그를 회수하지 못했습니다. 이 시점의 앱 상태는 미확정입니다.")
     with st.form("echo-demo"):
         message = st.text_input("보낼 메시지", value="kubeops-check", max_chars=256)
         send = st.form_submit_button("데모 요청 보내기")

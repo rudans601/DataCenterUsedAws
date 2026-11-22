@@ -24,8 +24,8 @@ _lock = threading.Lock()
 _cache: dict = {"fingerprint": None, "store": None}
 
 
-RUNBOOK_VERSION = "2.0"
-ACTIVE_DIR = "v2"
+RUNBOOK_VERSION = "3.0"
+ACTIVE_DIR = "v3"
 
 
 def _files():
@@ -108,7 +108,7 @@ def _keywords(signals: list[str]) -> set[str]:
 
 
 def search(query: str, signals: list[str] | None = None, k_runbooks: int = 3, k_incidents: int = 2,
-           *, event_reasons: set[str] | None = None) -> list[dict]:
+           *, event_reasons: set[str] | None = None, replay: bool = False) -> list[dict]:
     store = get_store()
     keywords = _keywords(signals or [])
     observed_events = {reason.casefold() for reason in event_reasons or ()}
@@ -137,11 +137,12 @@ def search(query: str, signals: list[str] | None = None, k_runbooks: int = 3, k_
     policy = Document(page_content=policy_doc["text"], metadata=policy_doc["metadata"])
     procedures = [hit for hit in ranked("runbooks", k_runbooks + 1)
                   if hit[0].metadata["source"] != policy.metadata["source"]][:k_runbooks]
-    # 공통 정책이 위임한 두 자동 절차를 빠짐없이 제공한다. 적용 여부는 관측값으로 판단한다.
+    # 재생 평가에는 네 유형에 공통인 단계별 판정 근거를 항상 제공한다.
+    required = ("/control-plane.md",) if replay else ("/high-load-scaling.md", "/revision-recovery.md")
     seen = {doc.metadata["source"] for doc, _ in procedures}
     for item in store.store.values():
         src = item["metadata"]["source"]
-        if src not in seen and src.endswith(("/high-load-scaling.md", "/revision-recovery.md")):
+        if src not in seen and src.endswith(required):
             procedures.append((Document(page_content=item["text"], metadata=item["metadata"]), None))
     results = [(policy, None), *procedures, *ranked("incidents", k_incidents)]
     return [

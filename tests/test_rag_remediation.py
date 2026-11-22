@@ -15,7 +15,7 @@ class RunbookTests(unittest.TestCase):
     def test_only_active_runbooks_and_reviewed_cases_are_searchable(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            paths = ["runbooks/old.md", "runbooks/v2/live.md", "incidents/reviewed.md",
+            paths = ["runbooks/old.md", "runbooks/v2/archived.md", "runbooks/v3/live.md", "incidents/reviewed.md",
                      "incidents/auto-from-old-version.md", "candidates/unreviewed.md"]
             for name in paths:
                 p = root / name
@@ -24,11 +24,11 @@ class RunbookTests(unittest.TestCase):
             with patch.object(rag, "settings", SimpleNamespace(knowledge_dir=root)):
                 docs = rag.load_chunks()
                 self.assertEqual([(d.metadata["kind"], d.metadata["version"]) for d in docs],
-                                 [("runbooks", "2.0"), ("incidents", "case")])
+                                 [("runbooks", "3.0"), ("incidents", "case")])
                 before = rag.corpus_revision()
                 (root / "candidates/unreviewed.md").write_text("unreviewed change")
                 self.assertEqual(before, rag.corpus_revision())
-                (root / "runbooks/v2/live.md").write_text("# revision")
+                (root / "runbooks/v3/live.md").write_text("# revision")
                 self.assertNotEqual(before, rag.corpus_revision())
 
     def test_no_experiment_labels_in_retrieval_or_model_messages(self):
@@ -39,16 +39,16 @@ class RunbookTests(unittest.TestCase):
                  "snapshot": {"secret_answer": "DO_NOT_LEAK"}, "evidence": evidence}
         p = {"action": "rollback", "deployment": "api", "namespace": "demo", "replicas": None}
         quote = "대상을 확인하고 운영자 승인 후 롤백한다."
-        doc = {"id": "D1", "source": "knowledge/runbooks/v2/example.md", "kind": "runbooks",
-               "version": "2.0", "content": "[approval.rollback] " + quote}
+        doc = {"id": "D1", "source": "knowledge/runbooks/v3/example.md", "kind": "runbooks",
+               "version": "3.0", "content": "[approval.rollback] " + quote}
         with patch.object(rag, "search", return_value=[doc]) as search:
             state.update(graph.retrieve(state))
             self.assertIn("404", search.call_args.args[0])
             self.assertNotIn("DO_NOT_LEAK", str(search.call_args))
         with patch.object(graph, "chat_model") as model:
             call = model.return_value.with_structured_output.return_value.invoke
-            for text, version, ids, expected in [(quote, "2.0", ["D1"], True), ("인용을 지어냈다", "2.0", ["D1"], False),
-                                                 (quote, "1.0", ["D1"], False), (quote, "2.0", ["D9"], False)]:
+            for text, version, ids, expected in [(quote, "3.0", ["D1"], True), ("인용을 지어냈다", "3.0", ["D1"], False),
+                                                 (quote, "2.0", ["D1"], False), (quote, "3.0", ["D9"], False)]:
                 state["docs"] = [{**doc, "version": version}]
                 call.return_value.model_dump.return_value = {
                     "proposal": p, "doc_ids": ids, "runbook_citation": {"doc_id": "D1", "quote": text},
@@ -76,14 +76,18 @@ class RunbookTests(unittest.TestCase):
             with patch.object(rag,"settings",config), patch.object(rag,"_cache",cache), \
                  patch.object(rag,"embeddings",return_value=DeterministicFakeEmbedding(size=6)):
                 first = rag.search("Pod readiness 404")
+                replay_docs = rag.search("운영 진행 상태", k_runbooks=0, k_incidents=0, replay=True)
+                self.assertEqual([d["source"].split("/")[-1] for d in replay_docs],
+                                 ["operations-policy.md", "control-plane.md"])
+                self.assertTrue(all(d["version"] == "3.0" for d in replay_docs))
                 cache.update(store=None, fingerprint=None)
                 loaded = rag.search("Pod readiness 404")
             self.assertEqual([r["source"] for r in first], [r["source"] for r in loaded])
             self.assertEqual(len(list(Path(temp).glob("index-*.json"))), 1)
             sources = {r["source"]: r for r in loaded}
             for name in ("operations-policy.md", *triage.AUTO_PROCEDURES.values()):
-                src = "knowledge/runbooks/v2/" + name
-                self.assertEqual(sources[src]["content"], (config.knowledge_dir / "runbooks"/"v2"/name).read_text().strip())
+                src = "knowledge/runbooks/v3/" + name
+                self.assertEqual(sources[src]["content"], (config.knowledge_dir / "runbooks"/"v3"/name).read_text().strip())
 
     def test_observed_warning_events_prioritize_complete_runbook(self):
         docs = rag.load_chunks()
@@ -123,7 +127,7 @@ class ChangeTests(unittest.TestCase):
         p = {"namespace": "demo", "deployment": "api", "action": "rollback"}
         filename = triage.AUTO_PROCEDURES["rollback"]
         a = {"route": "auto", "proposal": p, "confidence": "high", "service_detection": "normal", "impact": "warning", "target_grounded": True,
-             "citation_source": "knowledge/runbooks/v2/" + filename,
+             "citation_source": "knowledge/runbooks/v3/" + filename,
              "cited_procedures": ["auto.rollback"]}
         dep = {"name":"api", "uid":"a", "revision":"8", "generation":9, "observed_generation":9, "desired":2}
         snap = {"namespace":"demo", "deployments":[dep], "services":[{"name":"api", "ready_endpoints":2}],

@@ -1,10 +1,11 @@
 """데모 앱의 멱등 echo 요청. 같은 요청을 한 번만 재시도한다."""
+import os
 import time
 from datetime import datetime, timezone
 
 import requests
 
-ECHO_URL = "http://127.0.0.1:8080/api/echo"
+ECHO_URL = os.getenv("KUBEOPS_ECHO_URL", "http://127.0.0.1:8080/api/echo")
 
 
 def now():

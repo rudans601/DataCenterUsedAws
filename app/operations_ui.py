@@ -1,9 +1,11 @@
 """기존 Prometheus에 연결된 Grafana에서 실험 전후를 확인한다."""
+import os
+
 import streamlit as st
 
 from app.detection_ui import dashboard_period, dashboard_url
 from kubeops_copilot.detection import report_rows
-from kubeops_copilot.scenarios import NAMES
+from kubeops_copilot.scenarios import EKS_NAMES as NAMES
 
 
 @st.fragment
@@ -13,7 +15,10 @@ def render(directory):
         st.info("Grafana 주소를 KUBEOPS_GRAFANA_URL에 설정하면 대시보드가 표시됩니다.")
         return
     periods = {"최근 30분": "from=now-30m&to=now&refresh=15s"}
+    active_env = "eks" if os.getenv("KUBEOPS_EKS_LAB") == "1" else "kind"
     for row in report_rows(directory):
+        if row.get("environment", "kind") != active_env:
+            continue
         period = dashboard_period(row)
         if period:
             start, _, query = period

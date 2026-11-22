@@ -1,11 +1,12 @@
 """시드별 단일 상황을 kind에서 재현하고 복구 전에 수집한 HTTP 정답과 판정을 기록한다."""
 import argparse
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager, ExitStack, nullcontext
 from datetime import datetime
 import fcntl
 import json
 from pathlib import Path
 import math
+import os
 import re
 import signal
 import subprocess
@@ -19,14 +20,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from kubernetes.utils.quantity import parse_quantity
-from eval.cluster_fixtures import ARGS, KUBECTL, TEMPLATE, MISSING, inject, kubectl, patch, resource, restore_fields, value
+from eval.cluster_fixtures import ARGS, EKS_LAB, KUBECTL, TEMPLATE, MISSING, api_pods, inject, kubectl, patch, resource, restore_fields, value
+from eval.observation_capture import capture, current_client, fresh_probe, observer_logs
+from kubeops_copilot.observations import control_score, http_samples, now
 from eval.mentoring import PROBE_CLIENT, confirmed, observe, probe, wait_sample
 from kubeops_copilot import first_response, graph, incidents, k8s_tools, metrics, rag
 from kubeops_copilot.config import settings
 from kubeops_copilot.detection import PROTOCOL, ground_truth
 from kubeops_copilot.campaign import campaign_plan, DEFAULT_MIX
-from eval.remediation_score import reference_decision, recovery_outcome
-from kubeops_copilot.scenarios import NAMES, single_plan
+from eval.remediation_score import REFERENCE_VERSION, reference_decision, recovery_outcome
+from kubeops_copilot.scenarios import EKS_NAMES, single_plan
+from kubeops_copilot import control_replay
+from eval.eks_replay import evaluate_replay
 
 ADDRESS = "http://api.demo.svc.cluster.local:9898/"
 QUESTION = ("관측 구간 중 demo/api의 정상 Service 주소로 보낸 요청이 실패하거나 느려진 구간이 있었나요? "
@@ -94,6 +99,8 @@ def prepare(stack, case):
 
 
 def oracle_probe():
+    if EKS_LAB:
+        return fresh_probe()
     raw = kubectl("exec", PROBE_CLIENT, "--", "fortio", "load", "-n", "4", "-c", "1", "-qps", "0",
                   "-allow-initial-errors", "-quiet", "-timeout", "1s", "-p", "95", "-json", "-", ADDRESS,
                   namespace="traffic")
@@ -210,6 +217,13 @@ def establish(case, details):
         time.sleep(2)
 
 
+def service_reading(after):
+    if EKS_LAB:
+        return current_client(after=after)["client"]
+    code, latency = probe("api.demo.svc.cluster.local")
+    return {"at": now(), "code": code, "ms": latency}
+
+
 def measure(case, row, evidence, end, sample):
     # 원본 HTTP 정답은 모델에 전달할 근거와 별도 요청으로 수집한다.
     row["probes"].append(oracle_probe())
@@ -219,8 +233,7 @@ def measure(case, row, evidence, end, sample):
         time.sleep(min(5, max(0, end - time.monotonic())))
         if time.monotonic() < end:
             row["probes"].append(oracle_probe())
-            code, latency = probe("api.demo.svc.cluster.local")
-            readings.append({"at": datetime.now().astimezone().isoformat(), "code": code, "ms": latency})
+            readings.append(service_reading(readings[-1]["at"]))
     # 긴 실험도 최초 기동 순간에 고정되지 않게 마지막 관측 시점의 상태를 함께 전달한다.
     evidence.extend(model_evidence(case["conditions"]["visibility"], {}, row["_snapshot"]))
     row.setdefault("direct_readings", []).extend(readings)
@@ -251,9 +264,11 @@ def diagnose(evidence, snapshot, incident, app_receipt, visibility):
     def read_again():
         fresh_snapshot = {}
         readings = []
+        after = now()
         for _ in range(3):
-            code, latency = probe("api.demo.svc.cluster.local")
-            readings.append({"at": datetime.now().astimezone().isoformat(), "code": code, "ms": latency})
+            reading = service_reading(after)
+            readings.append(reading)
+            after = reading["at"]
         fresh = model_evidence(visibility, {}, fresh_snapshot)
         fresh.append({"source": "probe", "target": "demo/api", "severity": "info",
                       "title": "최초 판정 구간 이후의 대표 Service 직접 요청", "detail": json.dumps(readings)})
@@ -377,7 +392,10 @@ def assess_and_act(row, evidence, snapshot, stack, approver, approval_dir, origi
 
 
 def app_check(row, evidence, url=first_response.ECHO_URL):
-    receipt = first_response.echo("kubeops-check", url)
+    if EKS_LAB and url == first_response.ECHO_URL:
+        receipt = current_client()["echo"]
+    else:
+        receipt = first_response.echo("kubeops-check", url)
     row["app_checks"].append(receipt)
     incidents.record_echo(row["incident_id"], len(row["app_checks"]), receipt)
     if receipt["outcome"] != "healthy":
@@ -425,7 +443,10 @@ def evaluate(case, row, fixtures_only, approver, manual, approval_dir=None):
                 time.sleep(c["gap_s"])
             times = {"round": cycle + 1, "injection_started": datetime.now().astimezone().isoformat()}
             row["episodes"].append(times)
-            with ExitStack() as episode:
+            with ExitStack() as episode, (capture(row, f"주입 {cycle+1}") if EKS_LAB else nullcontext()):
+                if EKS_LAB:
+                    before_pods = api_pods()
+                    row["observation_windows"][-1]["baseline_pod_uids"] = [p["metadata"]["uid"] for p in before_pods]
                 original = None if fixtures_only else resource("deploy")
                 if case["case"] == "high-load":
                     peak, seconds = case["qps"], c["duration_s"]
@@ -448,6 +469,12 @@ def evaluate(case, row, fixtures_only, approver, manual, approval_dir=None):
                     if not fixtures_only:
                         app_check(row, evidence, details.get("echo_url", first_response.ECHO_URL))
                     measure(case, row, evidence, time.monotonic() + c["duration_s"], sample)
+                if EKS_LAB:
+                    api_pods()
+                    stages = control_score(row["observation_windows"][-1])
+                    evidence.append({"source": "probe", "target": "demo/api", "severity": "info",
+                                     "title": "Kubernetes 조회·변경 응답과 새 Pod 배치 관측",
+                                     "detail": json.dumps(stages, ensure_ascii=False)})
                 times["measured_until"] = datetime.now().astimezone().isoformat()
                 if not fixtures_only and c["visibility"] != "no_request_metrics":
                     evidence.extend(interval_evidence(times))
@@ -458,7 +485,7 @@ def evaluate(case, row, fixtures_only, approver, manual, approval_dir=None):
                     continue
                 row.update(truth=ground_truth(row["probes"]), measurement_status="complete",
                            evidence=[{**e, "id": f"E{i}"} for i,e in enumerate(evidence, 1)])
-                row["reference"] = reference_decision(case, row, snapshot)
+                row["reference"] = reference_decision(case, row, snapshot, environment="eks" if EKS_LAB else "kind")
                 row["recovered_by"] = ("observe" if case["case"] == "normal" else
                                        "load_ends" if case["case"] == "high-load" else "fixture")
                 if fixtures_only:
@@ -489,8 +516,12 @@ def evaluate(case, row, fixtures_only, approver, manual, approval_dir=None):
 
 def choose_cases(seed, choice, mix=None):
     if choice == "campaign":
-        return campaign_plan(seed, mix)
-    cases = single_plan(seed)
+        return campaign_plan(seed, mix, include_replay=EKS_LAB)
+    if not EKS_LAB and choice in (*control_replay.NAMES, "replays"):
+        raise ValueError("관리 구성요소 재생은 EKS 실측 환경에서 실행하세요.")
+    cases = single_plan(seed, include_replay=EKS_LAB)
+    if choice == "replays":
+        return [case for case in cases if case.get("mode") == control_replay.MODE]
     if choice == "random":
         cases = cases[:1]
     elif choice != "batch":
@@ -498,20 +529,33 @@ def choose_cases(seed, choice, mix=None):
     return cases
 
 
+def validate_target(server, agent_server):
+    if EKS_LAB:
+        if server != os.environ.get("KUBEOPS_EKS_VERIFIED_ENDPOINT") or not server.startswith("https://"):
+            raise RuntimeError("scripts/eks-lab.sh를 통해 검증된 EKS 실습 환경을 선택하세요.")
+    elif urlsplit(server).hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("kind API 서버가 로컬 주소여야 합니다.")
+    if agent_server != server:
+        raise RuntimeError("실험 실행기와 에이전트의 클러스터 주소가 다릅니다.")
+
+
 def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=None, stop_file=None):
     cases = choose_cases(seed, choice, mix)
     server = kubectl("config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}")
-    if urlsplit(server).hostname not in {"127.0.0.1", "localhost", "::1"} or k8s_tools.api_client().configuration.host != server:
-        raise RuntimeError("관리자와 에이전트 모두 로컬 kind-datacenterusedaws 클러스터를 선택해야 합니다.")
+    validate_target(server, k8s_tools.api_client().configuration.host)
     directory = ROOT / "eval" / "results"
     directory.mkdir(exist_ok=True)
     with (ROOT / ".kube" / "mentoring.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         started = datetime.now().astimezone()
         path = directory / f"detection-{started:%Y%m%d-%H%M%S-%f}.json"
-        report = {"protocol": PROTOCOL, "started": started.isoformat(), "seed": seed, "model": settings.llm_model,
+        report = {"environment": "eks" if EKS_LAB else "kind", "protocol": PROTOCOL, "started": started.isoformat(), "seed": seed, "model": settings.llm_model,
                   "fixtures_only": fixtures_only, "runbook_version": rag.RUNBOOK_VERSION, "corpus_revision": rag.corpus_revision(),
                   "prompt_version": graph.PROMPT_VERSION, "cases": []}
+        if any(case.get("mode") != control_replay.MODE for case in cases):
+            report["workload_reference_version"] = REFERENCE_VERSION
+        if EKS_LAB:
+            report["cluster_created_at"] = os.getenv("KUBEOPS_EKS_CREATED_AT")
         if choice == "campaign":
             report["campaign_mix"] = DEFAULT_MIX if mix is None else mix
         for index, case in enumerate(cases, 1):
@@ -522,8 +566,13 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
             report["cases"].append(row)
             print("실행", case["case"], flush=True)
             print("사건", row["incident_id"], flush=True)
+            simulated = case.get("mode") == control_replay.MODE
             try:
-                evaluate(case, row, fixtures_only, approver, manual, approval_dir)
+                if simulated:
+                    evaluate_replay(case, row, fixtures_only)
+                else:
+                    with capture(row, "전체 실험") if EKS_LAB else nullcontext():
+                        evaluate(case, row, fixtures_only, approver, manual, approval_dir)
             except KeyboardInterrupt:
                 row["measurement_status"] = "interrupted"
                 raise
@@ -537,18 +586,28 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
                 if not fixtures_only and row.get("measurement_status") == "complete":
                     incidents.issue(row["incident_id"], "실행 검토", "실험 중 조치 처리가 중단됐습니다.", {"오류": type(exc).__name__})
             finally:
-                try:
-                    rollout()
-                    rollout("deploy/loadgen-api", "traffic")
-                    row["after_fixture_cleanup"] = wait_sample("baseline")
-                    row["recovery_verified_at"] = datetime.now().astimezone().isoformat()
-                except Exception as exc:
-                    row["cleanup_error"] = str(exc)[:1200]
-                if not fixtures_only:
-                    incidents.record(row["incident_id"], "cleanup", "실험 도구", "실습 환경 원상복구 점검",
-                                     row.get("cleanup_error") or "기준 상태 확인 · 장애 조치 실적에서 제외")
-                    row["timeline"] = incidents.timeline(row["incident_id"])
-                    row["tickets"] = incidents.tickets(row["incident_id"])
+                if not simulated:
+                    try:
+                        rollout()
+                        rollout("deploy/loadgen-api", "traffic")
+                        row["after_fixture_cleanup"] = wait_sample("baseline")
+                        row["recovery_verified_at"] = datetime.now().astimezone().isoformat()
+                    except Exception as exc:
+                        row["cleanup_error"] = str(exc)[:1200]
+                    if not fixtures_only:
+                        incidents.record(row["incident_id"], "cleanup", "실험 도구", "실습 환경 원상복구 점검",
+                                         row.get("cleanup_error") or "기준 상태 확인 · 장애 조치 실적에서 제외")
+                        row["timeline"] = incidents.timeline(row["incident_id"])
+                        row["tickets"] = incidents.tickets(row["incident_id"])
+                    if EKS_LAB:
+                        windows = row["observation_windows"]
+                        try:
+                            lines = observer_logs(windows[0]["start"])
+                            for window in windows:
+                                window["http_samples"] = http_samples(lines, window["cluster"], window["start"], window["end"])
+                                window["http_score"] = ground_truth(window["http_samples"])
+                        except (RuntimeError, subprocess.SubprocessError, ValueError, OSError) as exc:
+                            row["observer_read_error"] = type(exc).__name__
                 temp = path.with_suffix(".tmp")
                 temp.write_text(json.dumps(report, ensure_ascii=False, indent=2))
                 temp.replace(path)
@@ -556,13 +615,14 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
                 break
         print("REPORT", path.name, flush=True)
         return int(len(report["cases"]) != len(cases) or any(
-            r.get("error") or r.get("cleanup_error") or r.get("prediction_error") for r in report["cases"]))
+            r.get("error") or r.get("cleanup_error") or r.get("prediction_error") or
+            r.get("measurement_status") == "insufficient" for r in report["cases"]))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--case", choices=["batch", "random", "campaign", *NAMES], default="batch")
+    parser.add_argument("--case", choices=["batch", "random", "campaign", "replays", *EKS_NAMES], default="batch")
     parser.add_argument("--fixtures-only", action="store_true")
     parser.add_argument("--plan", action="store_true", help="실행 없이 시드별 단일 조건을 출력")
     parser.add_argument("--approve", metavar="승인자")

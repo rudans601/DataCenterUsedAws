@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-observer
+  namespace: traffic
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: http-observer
+  template:
+    metadata:
+      labels:
+        app: http-observer
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: observer
+          image: public.ecr.aws/docker/library/python:3.12-alpine
+          command: ["python", "-B", "/observer/probe.py"]
+          env:
+            - name: CLUSTER_INSTANCE
+              valueFrom:
+                configMapKeyRef: {name: http-observer, key: cluster}
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {cpu: 50m, memory: 48Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: code, mountPath: /observer, readOnly: true}
+      volumes:
+        - name: code
+          configMap:
+            name: http-observer
+            items:
+              - {key: probe.py, path: probe.py}
