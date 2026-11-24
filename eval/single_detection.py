@@ -1,4 +1,4 @@
-"""시드별 단일 상황을 kind에서 재현하고 복구 전에 수집한 HTTP 정답과 판정을 기록한다."""
+"""kind/EKS 상황의 동일 HTTP 관측을 공유하고, 독립 채점과 모델 판정을 기록한다."""
 import argparse
 from contextlib import contextmanager, ExitStack, nullcontext
 from datetime import datetime
@@ -22,8 +22,8 @@ sys.path.insert(0, str(ROOT))
 from kubernetes.utils.quantity import parse_quantity
 from eval.cluster_fixtures import ARGS, EKS_LAB, KUBECTL, TEMPLATE, MISSING, api_pods, inject, kubectl, patch, resource, restore_fields, value
 from eval.observation_capture import capture, current_client, fresh_probe, observer_logs
-from kubeops_copilot.observations import control_score, http_samples, now
-from eval.mentoring import PROBE_CLIENT, confirmed, observe, probe, wait_sample
+from kubeops_copilot.observations import HTTP_OBSERVATION_VERSION, control_score, http_evidence, http_samples
+from eval.mentoring import PROBE_CLIENT, confirmed, observe, wait_sample
 from kubeops_copilot import first_response, graph, incidents, k8s_tools, metrics, rag
 from kubeops_copilot.config import settings
 from kubeops_copilot.detection import PROTOCOL, ground_truth
@@ -35,7 +35,9 @@ from eval.eks_replay import evaluate_replay
 
 ADDRESS = "http://api.demo.svc.cluster.local:9898/"
 QUESTION = ("관측 구간 중 demo/api의 정상 Service 주소로 보낸 요청이 실패하거나 느려진 구간이 있었나요? "
-            "서비스 장애 기준은 한 측정 구간의 실패율 5% 초과 또는 p95 300ms 초과입니다. "
+            "서비스 장애 기준은 최초 판정 구간 HTTP 묶음 중 한 묶음의 실패율 5% 초과 또는 p95 300ms 초과입니다. "
+            "각 묶음의 count·failed·p95_ms와 원시 표본을 확인하세요. 별도 echo 요청, 이동 평균, "
+            "최초 판정 구간 이후의 재측정은 보조 근거이며 최초 구간의 장애 발생 사실을 지우지 않습니다. "
             "대표 요청의 장애 판정과 배포 자체의 문제를 각각 판단하세요. 현재 운영 근거와 런북 원문으로 "
             "어떤 조치가 필요한지, 누가 처리할지 결정하세요. 근거가 부족하면 보류하고 이유를 알려주세요.")
 REQUEST_METRICS = {"rps", "error_ratio", "p95_ms", "request_seconds_per_second"}
@@ -186,7 +188,7 @@ def model_evidence(visibility, window, snapshot_out=None):
         rows.append({"source": "metrics", "target": "demo/api", "severity": "info",
                      "title": f"수집 시각 {at} 직전 2분 · 실험 이전 포함 가능", "detail": json.dumps(rolling)})
     if observed:
-        rows.append({"source": "probe", "target": "demo/api", "severity": "info", "title": f"실습 클라이언트 관측 · {at}",
+        rows.append({"source": "probe", "target": "demo/api", "severity": "info", "title": f"보조 실습 클라이언트 관측 · 최초 판정 HTTP 묶음과 구분 · {at}",
                      "detail": json.dumps(observed, ensure_ascii=False)})
     return rows
 
@@ -217,28 +219,21 @@ def establish(case, details):
         time.sleep(2)
 
 
-def service_reading(after):
-    if EKS_LAB:
-        return current_client(after=after)["client"]
-    code, latency = probe("api.demo.svc.cluster.local")
-    return {"at": now(), "code": code, "ms": latency}
-
-
 def measure(case, row, evidence, end, sample):
-    # 원본 HTTP 정답은 모델에 전달할 근거와 별도 요청으로 수집한다.
-    row["probes"].append(oracle_probe())
+    # 한 번 수집한 동일 묶음을 채점과 모델 근거에 함께 사용한다.
+    row["http_observation_version"] = HTTP_OBSERVATION_VERSION
+    batches = [oracle_probe()]
+    row["probes"].extend(batches)
     evidence.extend(model_evidence(case["conditions"]["visibility"], sample, row.setdefault("_snapshot", {})))
-    readings = [{"at": sample["api_observed_at"], "code": sample["api_code"], "ms": sample["api_ms"]}]
     while time.monotonic() < end:
         time.sleep(min(5, max(0, end - time.monotonic())))
         if time.monotonic() < end:
-            row["probes"].append(oracle_probe())
-            readings.append(service_reading(readings[-1]["at"]))
+            batch = oracle_probe()
+            row["probes"].append(batch)
+            batches.append(batch)
     # 긴 실험도 최초 기동 순간에 고정되지 않게 마지막 관측 시점의 상태를 함께 전달한다.
     evidence.extend(model_evidence(case["conditions"]["visibility"], {}, row["_snapshot"]))
-    row.setdefault("direct_readings", []).extend(readings)
-    evidence.append({"source": "probe", "target": "demo/api", "severity": "info", "title": f"이번 실험 판정 구간 · {readings[0]['at']} ~ {readings[-1]['at']} · 정상 Service 주소 {ADDRESS} 직접 요청 시계열",
-                     "detail": json.dumps(readings)})
+    evidence.append(http_evidence(batches))
 
 
 def interval_evidence(times):
@@ -260,18 +255,17 @@ def interval_evidence(times):
     return result
 
 
-def diagnose(evidence, snapshot, incident, app_receipt, visibility):
+def diagnose(evidence, snapshot, incident, app_receipt, visibility, recheck_probes=None):
     def read_again():
         fresh_snapshot = {}
-        readings = []
-        after = now()
+        batches = []
         for _ in range(3):
-            reading = service_reading(after)
-            readings.append(reading)
-            after = reading["at"]
+            batch = oracle_probe()
+            batches.append(batch)
+            if recheck_probes is not None:
+                recheck_probes.append(batch)
         fresh = model_evidence(visibility, {}, fresh_snapshot)
-        fresh.append({"source": "probe", "target": "demo/api", "severity": "info",
-                      "title": "최초 판정 구간 이후의 대표 Service 직접 요청", "detail": json.dumps(readings)})
+        fresh.append(http_evidence(batches, "최초 판정 구간 이후 · 회복 확인용 HTTP 관측 묶음"))
         return {"evidence": fresh, "snapshot": fresh_snapshot}
 
     inputs = [{**item, "id": f"E{i}"} for i, item in enumerate(evidence, 1)]
@@ -334,7 +328,8 @@ def assess_and_act(row, evidence, snapshot, stack, approver, approval_dir, origi
     # 정답·유형·시드·정리 방식은 모델이 받는 state에 포함시키지 않는다.
     try:
         print("단계 · 에이전트가 운영 근거와 런북을 확인하고 있습니다.", flush=True)
-        state = diagnose(evidence, snapshot, row["incident_id"], row["app_checks"][-1], row["conditions"]["visibility"])
+        state = diagnose(evidence, snapshot, row["incident_id"], row["app_checks"][-1], row["conditions"]["visibility"],
+                         row.setdefault("recheck_probes", []))
     except Exception as exc:
         timed_out = "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
         row.update(prediction_status="timeout" if timed_out else "error", prediction_error=type(exc).__name__)
@@ -406,10 +401,10 @@ def app_check(row, evidence, url=first_response.ECHO_URL):
                          "title": "앱의 실제 echo 요청과 재시도 결과", "detail": json.dumps(receipt, ensure_ascii=False)})
 
 
-def app_resolved(checks, samples, readings):
+def app_resolved(checks, samples, probes):
     if not checks or not samples or not any(r["outcome"] == "recovered" for r in checks):
         return False
-    if not readings or any(r.get("code") != 200 or r.get("ms") is None or r["ms"] > 300 for r in readings):
+    if ground_truth(probes) != "normal":
         return False
     return all(r["outcome"] != "escalated" for r in checks) and all(
         s.get("api_code") == 200 and s.get("echo_ok") and s.get("endpoints", 0) > 0
@@ -493,9 +488,8 @@ def evaluate(case, row, fixtures_only, approver, manual, approval_dir=None):
                                        "load_ends" if case["case"] == "high-load" else "fixture")
                 if fixtures_only:
                     continue
-                if not row.get("judgement_only") and app_resolved(row["app_checks"], samples, row["direct_readings"]):
-                    row.update(prediction_status="app_recovered", recovered_by="app", recovery_outcome="앱 요청 복구")
-                    continue
+                # 앱 자체 회복도 관측 사실로 남기되 진단을 요청한 모든 회차에서 모델을 호출한다.
+                row["app_recovered_before_diagnosis"] = app_resolved(row["app_checks"], samples, row["probes"])
                 incidents.record(row["incident_id"], "agent-intake", "시스템", "에이전트 진단 요청",
                                  "앱 요청 결과와 클러스터의 관측값을 함께 전달했습니다.")
                 load_pod = None
@@ -551,7 +545,7 @@ def save_report(path, report):
 def resume_campaign(path, expected):
     report = json.loads(path.read_text())
     if not report.get("campaign_mix") or any(report.get(k) != v for k, v in expected.items()):
-        raise ValueError("같은 클러스터·모델·채점 버전으로 실행한 100회 보고서를 선택하세요.")
+        raise ValueError("같은 클러스터·모델·채점·HTTP 관측 버전으로 실행한 100회 보고서를 선택하세요. 구버전 기록은 보존하고 새 평가를 시작하세요.")
     rows = report["cases"]
     if len(rows) > 100 or any(r.get("trial") != i for i, r in enumerate(rows, 1)):
         raise ValueError("회차가 연속된 100회 평가 기록이 필요합니다.")
@@ -589,7 +583,8 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         started = datetime.now().astimezone()
         metadata = {"environment": "eks" if EKS_LAB else "kind", "protocol": PROTOCOL, "model": settings.llm_model,
-                    "runbook_version": rag.RUNBOOK_VERSION, "corpus_revision": rag.corpus_revision(), "prompt_version": graph.PROMPT_VERSION}
+                    "runbook_version": rag.RUNBOOK_VERSION, "corpus_revision": rag.corpus_revision(), "prompt_version": graph.PROMPT_VERSION,
+                    "http_observation_version": HTTP_OBSERVATION_VERSION}
         if EKS_LAB:
             metadata["cluster_created_at"] = os.environ["KUBEOPS_EKS_CREATED_AT"]
         if resume is not None:

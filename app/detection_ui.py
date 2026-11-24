@@ -15,6 +15,8 @@ from kubeops_copilot import incidents, request_safety
 from kubeops_copilot.triage import IMPACTS, ROUTES
 from kubeops_copilot.detection import CELLS, LABELS, PROTOCOL, LEGACY_PROTOCOL, bucket, decision_matrix, experiment_impact, report_rows, statistics, severity_statistics, handoff_counts
 from kubeops_copilot.scenarios import EKS_NAMES as NAMES, RECOVERY, condition_rows
+from kubeops_copilot.detection import equivalent_decision_matrices
+from kubeops_copilot.observations import HTTP_OBSERVATION_VERSION
 
 
 def dashboard_url():
@@ -109,7 +111,7 @@ def show_rows(rows):
                           for p in row["probes"]]
                 st.dataframe(probes, hide_index=True)
             details = {k: row[k] for k in ("remaining_capacity", "episodes", "pulses", "injected", "evidence", "action_result",
-                                             "documents", "findings", "before_action", "pre_action_probes", "verification", "after_action_probes", "after_action", "after_fixture_cleanup") if row.get(k)}
+                                             "documents", "findings", "recheck_probes", "before_action", "pre_action_probes", "verification", "after_action_probes", "after_action", "after_fixture_cleanup") if row.get(k)}
             if details:
                 st.json(details, expanded=False)
             if action := row.get("proposed_action"):
@@ -150,6 +152,7 @@ def show_campaign(rows, directory):
     last = rows[-1]
     retryable = last.get("measurement_status") in ("failed", "timeout", "interrupted", "started") and not last.get("prediction")
     if (first["environment"] == "eks" and os.getenv("KUBEOPS_EKS_VERIFIED_ENDPOINT")
+            and first.get("http_observation_version") == HTTP_OBSERVATION_VERSION
             and first.get("cluster_created_at") == os.getenv("KUBEOPS_EKS_CREATED_AT")
             and st.get_option("server.address") in {"127.0.0.1", "localhost", "::1"} and (len(rows) < 100 or retryable)):
         disabled = "lab_run" in st.session_state or lab_busy()
@@ -160,16 +163,22 @@ def show_campaign(rows, directory):
 
 
 def show_decisions(rows):
-    for field, title, labels in [("impact", "위험 등급", IMPACTS), ("route", "처리 방식", ROUTES), ("action", "조치 선택", ACTION_NAMES)]:
+    fields = [("impact", "위험 등급", IMPACTS), ("route", "처리 방식", ROUTES)]
+    same_actions = equivalent_decision_matrices(rows, "route", "action")
+    if not same_actions:
+        fields.append(("action", "조치 선택", ACTION_NAMES))
+    for field, title, labels in fields:
         pairs, missing = decision_matrix(rows, field)
         st.markdown(f"#### {title} 혼동행렬")
         st.caption(f"행은 독립 채점 기준, 열은 재측정이 있으면 재판정까지 반영한 에이전트의 제안입니다. 기준 미확정 {missing}건.")
         if pairs:
             columns = list(dict.fromkeys([*(a for a, _ in pairs), *(b for _, b in pairs)]))
-            st.dataframe([{"실제 기준": labels.get(a, a), **{labels.get(b,b): pairs[a,b] for b in columns}}
-                          for a in dict.fromkeys(a for a, _ in pairs)], hide_index=True)
+            st.dataframe([{"실제 기준 ↓ \\ 에이전트 판단 →": labels.get(a, a), **{labels.get(b,b): pairs[a,b] for b in columns}}
+                          for a in dict.fromkeys(a for a, _ in pairs)], hide_index=True, width="stretch")
         else:
             st.caption("선택한 기록에 채점 가능한 판단이 없습니다.")
+    if same_actions:
+        st.caption("선택한 기록에서 조치 선택이 처리 방식과 회차별로 일대일 대응하여 표 하나로 표시합니다. 개별 조치는 상세 기록에서 확인할 수 있습니다.")
     judged = [r for r in rows if r.get("prediction_status") == "complete"]
     if judged:
         st.caption(f"현행 런북 원문 인용 확인 {sum(bool(r.get('citation_source')) for r in judged)}/{len(judged)}건")
@@ -267,9 +276,10 @@ def render(directory):
     if protocol == PROTOCOL:
         def version_key(row):
             return (row.get("runbook_version") or "미기록", row.get("prompt_version") or "초기",
-                    row.get("corpus_revision") or "초기", row.get("workload_reference_version") or "워크로드 채점 버전 미기록")
+                    row.get("corpus_revision") or "초기", row.get("workload_reference_version") or "워크로드 채점 버전 미기록",
+                    "동일 HTTP 관측" if row.get("http_observation_version") == "shared-http-v1" else "기존 별도 HTTP 관측")
         versions = list(dict.fromkeys(version_key(r) for r in rows))
-        version = st.selectbox("런북·프롬프트·문서·채점 버전", versions, format_func=lambda v: " · ".join(v))
+        version = st.selectbox("런북·프롬프트·문서·채점·관측 버전", versions, format_func=lambda v: " · ".join(v))
         rows = [r for r in rows if version_key(r) == version]
     a, b, c, run_filter = st.columns(4)
     case = a.selectbox("상황 유형", ["전체", *NAMES], format_func=lambda v: NAMES.get(v, v), key="cm_case")
@@ -288,6 +298,7 @@ def render(directory):
     for i, (name, rate) in enumerate(metrics.items()):
         cols[i % 3].metric(name, f"{rate:.1%}" if rate is not None else "계산 불가")
     header = st.columns([1, 2, 2])
+    header[0].markdown("**실제 기준 ↓ \\ 에이전트 판단 →**")
     header[1].markdown("**장애로 판정**")
     header[2].markdown("**정상으로 판정**")
     cell_names = {"TP": "장애 탐지", "FN": "미탐", "FP": "오탐", "TN": "정상 판정"}

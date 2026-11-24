@@ -111,7 +111,8 @@ class ControlReplayTests(unittest.TestCase):
             clock.now.return_value = self.end
             eks_replay.evaluate_replay(case, row, False)
         payload = json.dumps(model.call_args.args[0])
-        for label in ("api-timeout", "recovers", "reference", "trial_seed", "latencies_ms"):
+        for label in ("api-timeout", "recovers", "reference", "trial_seed", "target_tier"):
             self.assertNotIn(label, payload)
+        self.assertEqual(row["probes"], json.loads(model.call_args.args[0]["evidence"][1]["detail"]))
         self.assertEqual(("warning", True, False), (experiment_impact(row)[0], row["impact_correct"], row["route_correct"]))
         self.assertEqual(1, decision_matrix([row], "route")[0]["handoff", "observe"])

@@ -6,6 +6,16 @@ from datetime import datetime, timezone
 
 from .detection import ground_truth
 
+HTTP_OBSERVATION_VERSION = "shared-http-v1"
+
+
+def http_evidence(samples, title="최초 판정 구간 · 대표 Service HTTP 관측 묶음"):
+    """채점과 공유하는 측정값만 복사한다. 정답이나 시나리오 메타데이터는 전달하지 않는다."""
+    keys = ("start", "at", "cluster", "source", "target", "codes", "latencies_ms", "count", "failed", "p95_ms")
+    measured = [{k: sample[k] for k in keys if k in sample} for sample in samples]
+    return {"source": "probe", "target": "demo/api", "severity": "info", "title": title,
+            "detail": json.dumps(measured, ensure_ascii=False, allow_nan=False)}
+
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")

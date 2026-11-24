@@ -32,11 +32,11 @@ class AppRecoveryTests(unittest.TestCase):
         sample = dict(api_code=200, echo_ok=True, endpoints=2, ready=2, desired=2,
                       p95_ms=3, error_ratio=0, observation_started=100, last_pod_warning=90)
         checks = [{"outcome": "recovered"}]
-        readings = [{"code": 200, "ms": 3}]
+        readings = [{"count": 4, "failed": 0, "p95_ms": 3}]
         self.assertTrue(single_detection.app_resolved(checks, [sample], readings))
         for anomaly in [{"ready": 1}, {"p95_ms": None}, {"last_pod_warning": 101}, {"dns_error": "NXDOMAIN"}]:
             self.assertFalse(single_detection.app_resolved(checks, [{**sample, **anomaly}], readings))
-        self.assertFalse(single_detection.app_resolved(checks, [sample], readings + [{"code": 503, "ms": 8}]))
+        self.assertFalse(single_detection.app_resolved(checks, [sample], readings + [{"count": 4, "failed": 1, "p95_ms": 8}]))
 
     def test_app_resolution_never_earns_model_credit(self):
         row = dict(fixtures_only=False, protocol=detection.PROTOCOL, measurement_status="complete",

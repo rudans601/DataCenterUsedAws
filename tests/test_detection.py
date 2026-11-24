@@ -10,6 +10,30 @@ from kubeops_copilot.scenarios import NAMES, condition_rows, single_plan
 
 
 class DetectionTests(unittest.TestCase):
+    def test_duplicate_matrices_require_per_trial_correspondence(self):
+        def row(route, action, model_route, model_action):
+            return dict(protocol=d.PROTOCOL, fixtures_only=False, prediction_status="complete",
+                        reference=dict(route=route, action=action), model_route=model_route,
+                        proposed_action=model_action, proposal=dict(namespace="demo", deployment="api"))
+
+        rows = [row("observe", "none", "handoff", "manual"),
+                row("handoff", "manual", "observe", "none"),
+                row("approval", "rollback", "approval", "rollback")]
+        self.assertTrue(d.equivalent_decision_matrices(rows, "route", "action"))
+        # 승인 경로에서도 롤백과 재시작을 구별해야 하면 두 표를 유지한다.
+        different = rows + [row("approval", "restart", "approval", "restart")]
+        self.assertFalse(d.equivalent_decision_matrices(different, "route", "action"))
+        # 집계 숫자가 같아도 서로 다른 회차에서 틀렸으면 중복으로 취급하지 않는다.
+        aligned = [row("observe", "none", "observe", "none"),
+                   row("observe", "none", "handoff", "manual")]
+        swapped = [dict(aligned[0], proposed_action="manual"),
+                   dict(aligned[1], proposed_action="none")]
+        self.assertEqual(d.decision_matrix(aligned, "action"), d.decision_matrix(swapped, "action"))
+        self.assertFalse(d.equivalent_decision_matrices(swapped, "route", "action"))
+        missing = rows + [row("handoff", None, "handoff", "manual")]
+        self.assertFalse(d.equivalent_decision_matrices(missing, "route", "action"))
+        self.assertFalse(d.equivalent_decision_matrices([], "route", "action"))
+
     def test_balanced_seeded_valid_conditions(self):
         for seed in range(50):
             plan = single_plan(seed)

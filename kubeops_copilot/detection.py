@@ -99,6 +99,7 @@ def report_rows(directory, environment=None):
             rows.append({**row, "environment": doc.get("environment", "kind"), "cluster_created_at": doc.get("cluster_created_at"), "protocol": doc["protocol"], "corpus_revision": doc.get("corpus_revision"),
                          "prompt_version": doc.get("prompt_version"), "runbook_version": doc.get("runbook_version"), "report": path.name,
                          "workload_reference_version": doc.get("workload_reference_version"),
+                         "http_observation_version": row.get("http_observation_version", doc.get("http_observation_version", "separate-http-v1")),
                          "seed": row.get("trial_seed", doc["seed"]), "campaign_seed": doc["seed"] if doc.get("campaign_mix") else None,
                          "campaign_planned_counts": planned, "campaign_mix": doc.get("campaign_mix"), "started": doc["started"],
                          "model": doc["model"], "fixtures_only": doc["fixtures_only"]})
@@ -147,6 +148,23 @@ def decision_matrix(rows, field):
                 predicted = "복제본 수 불일치"
         pairs[expected, predicted] += 1
     return pairs, missing
+
+
+def equivalent_decision_matrices(rows, first, second):
+    """각 회차의 정답과 판정이 동일한 일대일 대응인지 확인한다."""
+    forward, reverse = {}, {}
+    for row in rows:
+        left, left_missing = decision_matrix([row], first)
+        right, right_missing = decision_matrix([row], second)
+        if left_missing != right_missing or bool(left) != bool(right):
+            return False
+        if not left:
+            continue
+        for a, b in zip(next(iter(left)), next(iter(right))):
+            if (a in forward and forward[a] != b) or (b in reverse and reverse[b] != a):
+                return False
+            forward[a], reverse[b] = b, a
+    return bool(forward)
 
 
 def handoff_counts(rows):

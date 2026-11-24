@@ -27,7 +27,7 @@ def fresh_probe():
 
 
 def current_client(after=None):
-    # 모델에 제공할 직접 요청은 채점용 4건과 별도로 전송한다.
+    # 실습 상태 확인과 echo용 보조 요청. 탐지 채점과 모델의 주 근거는 fresh_probe의 같은 묶음이다.
     until = time.monotonic() + 16
     while True:
         lines = kubectl("logs", "deploy/http-observer", "-c", "observer", "--tail=1", namespace="traffic")

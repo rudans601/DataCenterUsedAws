@@ -8,7 +8,7 @@ from eval.cluster_fixtures import kubectl
 from eval.observation_capture import observer_logs
 from kubeops_copilot import graph
 from kubeops_copilot.control_replay import make_window
-from kubeops_copilot.observations import instant, replay
+from kubeops_copilot.observations import HTTP_OBSERVATION_VERSION, http_evidence, instant, replay
 
 
 def endpoint_sample():
@@ -32,7 +32,10 @@ def evaluate_replay(case, row, fixtures_only):
     result = replay(window, lines)
     ref = result["reference"]
     window.update(http_samples=result["samples"], http_score=result["http"])
-    row.update(truth=ref["http"], reference=ref, probes=result["samples"], measurement_status="complete")
+    # 채점 기준 시점 이전의 정상 요청이 사건 판정에 섞이지 않게 같은 구간을 공유한다.
+    active = [s for s in result["samples"] if instant(s["start"]) >= instant(window["assess_from"])]
+    row.update(truth=ref["http"], reference=ref, probes=active, measurement_status="complete",
+               http_observation_version=HTTP_OBSERVATION_VERSION)
     if ref["impact"] == "unknown":
         row["measurement_status"] = "insufficient"
     if fixtures_only:
@@ -40,21 +43,13 @@ def evaluate_replay(case, row, fixtures_only):
 
     evidence = [{"id": "E1", "source": "events", "target": "demo/api", "severity": "info",
                  "title": "같은 사건의 Kubernetes 기록 (합성)", "detail": json.dumps(window["control"], ensure_ascii=False)}]
-    # 별도로 전송된 클라이언트 요청만 모델에 제공한다. 채점용 4건 묶음은 공개하지 않는다.
-    clients = []
-    for line in lines:
-        item = json.loads(line)
-        sample = item.get("client")
-        if ((item.get("cluster"), item.get("source"), item.get("target")) ==
-                (cluster, "traffic/http-observer", "demo/api") and sample
-                and instant(window["assess_from"]) <= instant(sample["at"]) <= instant(window["end"])):
-            clients.append({k: sample[k] for k in ("at", "ms", "code")})
-    evidence.append({"id": "E2", "source": "probe", "target": "demo/api", "severity": "info",
-                     "title": "EKS 워커 앱 요청 실측", "detail": json.dumps(clients)})
+    evidence.append({"id": "E2", **http_evidence(active)})
     if endpoints:
         evidence.append({"id": "E3", "source": "probe", "target": "demo/api", "severity": "info",
                          "title": "EKS EndpointSlice 실측", "detail": json.dumps(endpoints)})
     state = {"control_replay": True, "namespace": "demo", "question": "사건 구간의 HTTP 영향과 최고 위험 등급, 마지막 관측에서 필요한 처리 방식을 판단하세요. "
+             "HTTP는 제공된 묶음별 실패율 5% 초과 또는 p95 300ms 초과 여부를 확인하세요. "
+             "나중에 회복해도 사건 구간의 장애 발생 사실은 유지합니다. "
              "조회·쓰기·생성·배치 중 확인한 단계와 원인의 근거, 회복 여부를 설명하세요.",
              "intent": {"targets": ["api"]}, "evidence": evidence, "signals": []}
     row["evidence"] = evidence
