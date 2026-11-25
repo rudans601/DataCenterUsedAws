@@ -8,6 +8,7 @@ __pycache__/
 .kube/
 data/
 /eval/results/
+/eval/comparisons/
 .DS_Store
 .ruff_cache/
 

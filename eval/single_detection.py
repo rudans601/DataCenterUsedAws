@@ -3,6 +3,7 @@ import argparse
 from contextlib import contextmanager, ExitStack, nullcontext
 from datetime import datetime
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 import math
@@ -32,6 +33,7 @@ from eval.remediation_score import REFERENCE_VERSION, reference_decision, recove
 from kubeops_copilot.scenarios import EKS_NAMES, single_plan
 from kubeops_copilot import control_replay
 from eval.eks_replay import evaluate_replay
+from eval import revision_evidence
 
 ADDRESS = "http://api.demo.svc.cluster.local:9898/"
 QUESTION = ("관측 구간 중 demo/api의 정상 Service 주소로 보낸 요청이 실패하거나 느려진 구간이 있었나요? "
@@ -98,6 +100,24 @@ def prepare(stack, case):
         strategy = {"type": "Recreate"} if c["scope"] == "api" else {
             "type": "RollingUpdate", "rollingUpdate": {"maxSurge": 1, "maxUnavailable": 0}}
         temporary_patch(stack, "deploy/api", "demo", {"/spec/strategy": strategy})
+
+
+def collect_baseline(row):
+    baseline_started = datetime.now().astimezone().isoformat()
+    before_baseline = resource("deploy") if EKS_LAB else None
+    row["baseline"] = wait_sample("baseline")
+    if EKS_LAB:
+        # 이전 HTTP 행을 새 리비전의 정상 이력으로 잘못 연결하지 않는다.
+        for _ in range(3):
+            if datetime.fromisoformat(row["baseline"]["api_observed_at"]) >= datetime.fromisoformat(baseline_started):
+                break
+            time.sleep(2)
+            row["baseline"] = wait_sample("baseline")
+        after_baseline = resource("deploy")
+        sets = json.loads(kubectl("get", "replicasets", "-o", "json"))["items"]
+        row["baseline_revision"] = revision_evidence.baseline_record(
+            before_baseline, after_baseline, sets, row["baseline"], baseline_started,
+            datetime.now().astimezone().isoformat())
 
 
 def oracle_probe():
@@ -427,7 +447,7 @@ def evaluate(case, row, fixtures_only, approver, manual, approval_dir=None):
         rollout("deploy/loadgen-api", "traffic")
         wait_sample("baseline")
         prepare(setup, case)
-        row["baseline"] = wait_sample("baseline")
+        collect_baseline(row)
         row["baseline_at"] = datetime.now().astimezone().isoformat()
         baseline = {k: row["baseline"].get(k) for k in ("api_code", "api_ms", "endpoints", "ready", "desired")}
         if c["visibility"] != "no_request_metrics":
@@ -481,6 +501,10 @@ def evaluate(case, row, fixtures_only, approver, manual, approval_dir=None):
                 snapshot = row.pop("_snapshot", {})
                 if cycle + 1 != c["repeat"]:
                     continue
+                if row.get("baseline_revision"):
+                    evidence.append(revision_evidence.recovery_evidence(
+                        row["baseline_revision"], resource("deploy"), json.loads(kubectl("get", "replicasets", "-o", "json"))["items"],
+                        datetime.now().astimezone().isoformat()))
                 row.update(truth=ground_truth(row["probes"]), measurement_status="complete",
                            evidence=[{**e, "id": f"E{i}"} for i,e in enumerate(evidence, 1)])
                 row["reference"] = reference_decision(case, row, snapshot, environment="eks" if EKS_LAB else "kind")
@@ -574,7 +598,21 @@ def resume_campaign(path, expected):
     return report, cases
 
 
-def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=None, stop_file=None, resume=None):
+def retest_case(source, trial):
+    raw = source.read_bytes()
+    report = json.loads(raw)
+    plan = report.get("campaign_plan") or []
+    if not 1 <= trial <= len(plan) or plan[trial - 1].get("trial") != trial:
+        raise ValueError("원본 보고서의 저장된 계획에 해당 회차가 없습니다.")
+    case = plan[trial - 1]
+    if report.get("environment") != ("eks" if EKS_LAB else "kind") or case.get("mode"):
+        raise ValueError("같은 환경의 실제 워크로드 회차만 재검증할 수 있습니다.")
+    return case, {"source_report": source.name, "source_sha256": hashlib.sha256(raw).hexdigest(),
+                  "trial": trial, "source_model": report.get("model"), "kind": "live-judgement-only"}
+
+
+def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=None, stop_file=None, resume=None,
+        retest_report=None, trial=None):
     server = kubectl("config", "view", "--minify", "-o", "jsonpath={.clusters[0].cluster.server}")
     validate_target(server, k8s_tools.api_client().configuration.host)
     directory = ROOT / "eval" / "results"
@@ -586,6 +624,8 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
                     "runbook_version": rag.RUNBOOK_VERSION, "corpus_revision": rag.corpus_revision(), "prompt_version": graph.PROMPT_VERSION,
                     "http_observation_version": HTTP_OBSERVATION_VERSION}
         if EKS_LAB:
+            metadata["revision_evidence_version"] = revision_evidence.VERSION
+        if EKS_LAB:
             metadata["cluster_created_at"] = os.environ["KUBEOPS_EKS_CREATED_AT"]
         if resume is not None:
             path = resume.resolve()
@@ -595,7 +635,14 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
             choice = "campaign"
             fixtures_only = report["fixtures_only"]
         else:
-            cases = choose_cases(seed, choice, mix)
+            if retest_report is not None:
+                case, provenance = retest_case(retest_report, trial)
+                if provenance["source_model"] != settings.llm_model:
+                    raise ValueError("원본과 같은 모델 설정으로 재검증하세요.")
+                cases, seed = [case], case["trial_seed"]
+                metadata["retest"] = provenance
+            else:
+                cases = choose_cases(seed, choice, mix)
             path = directory / f"detection-{started:%Y%m%d-%H%M%S-%f}.json"
             report = {**metadata, "started": started.isoformat(), "seed": seed, "fixtures_only": fixtures_only, "cases": []}
             if any(case.get("mode") != control_replay.MODE for case in cases):
@@ -612,7 +659,7 @@ def run(seed, choice, fixtures_only, approver, manual, approval_dir=None, mix=No
                 break
             print(f"단계 · {index}/{len(cases)}회", flush=True)
             row = {**case, "incident_id": uuid4().hex}
-            if choice == "campaign" and not fixtures_only:
+            if (choice == "campaign" or retest_report is not None) and not fixtures_only:
                 row["judgement_only"] = True
             report["cases"].append(row)
             print("실행", case["case"], flush=True)
@@ -680,7 +727,13 @@ if __name__ == "__main__":
     parser.add_argument("--mix", type=int, nargs=4, metavar=("정상", "주의", "장애", "중대"), help="100회 목표 비율")
     parser.add_argument("--stop-file", type=Path, help="현재 사건 정리 후 다음 사건을 시작하지 않을 신호 파일")
     parser.add_argument("--resume", type=Path, help="기존 100회 보고서의 다음 회차부터 재개")
+    parser.add_argument("--retest-report", type=Path, help="원본을 보존하고 저장된 한 회차의 조건만 새로 실측·판정")
+    parser.add_argument("--trial", type=int, help="--retest-report에서 재실행할 원본 회차 번호")
     args = parser.parse_args()
+    if args.retest_report is not None or args.trial is not None:
+        if (args.retest_report is None or args.trial is None or args.resume or args.plan or args.mix
+                or args.approve or args.wait_operator or args.approval_dir or args.fixtures_only or args.case != "batch"):
+            parser.error("--retest-report와 --trial을 함께 지정하며 판정만 수행합니다. 다른 실행 방식과 섞을 수 없습니다.")
     if args.resume and (args.plan or args.mix or args.approve or args.wait_operator or args.approval_dir or args.fixtures_only or args.case != "batch"):
         parser.error("--resume은 기존 보고서에 저장된 계획과 모델 사용 설정을 따릅니다.")
     mix = dict(zip(DEFAULT_MIX, args.mix)) if args.mix is not None else None
@@ -693,4 +746,5 @@ if __name__ == "__main__":
     def stop(signum, frame):
         raise KeyboardInterrupt("실습 중지")
     signal.signal(signal.SIGTERM, stop)
-    raise SystemExit(run(args.seed, args.case, args.fixtures_only, args.approve, args.wait_operator, args.approval_dir, mix, args.stop_file, args.resume))
+    raise SystemExit(run(args.seed, args.case, args.fixtures_only, args.approve, args.wait_operator, args.approval_dir,
+                        mix, args.stop_file, args.resume, args.retest_report, args.trial))

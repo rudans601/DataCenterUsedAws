@@ -26,8 +26,8 @@ Path(".kube/eks-cluster.yaml").write_text(yaml.safe_dump(config))
 PY
     exec eksctl create cluster -f .kube/eks-cluster.yaml --write-kubeconfig=false
     ;;
-  setup|observer|run|web|delete) ;;
-  *) echo "사용법: $0 create|setup|observer|run [first-three|all|replays|유형] [시드]|web|delete" >&2; exit 2 ;;
+  setup|observer|run|web|delete|retest) ;;
+  *) echo "사용법: $0 create|setup|observer|run [first-three|all|replays|유형] [시드]|retest 보고서 회차|web|delete" >&2; exit 2 ;;
 esac
 metadata=$(aws eks describe-cluster --name "$cluster" --query 'cluster.[arn,endpoint,tags.Project,tags.Purpose,createdAt]' --output text)
 read -r arn endpoint project purpose created_at <<< "$metadata"
@@ -140,6 +140,14 @@ forward() {
     return 1
 }
 mode=$1
+if [[ "$mode" == retest ]]; then
+    : "${2:?원본 평가 보고서 경로를 지정하세요}" "${3:?원본 회차 번호를 지정하세요}"
+    # 기존 웹 터널과 충돌하지 않는 별도 Prometheus 포트. HTTP 측정은 관측 Pod에서 수행한다.
+    export PROMETHEUS_URL=http://127.0.0.1:19091
+    forward monitoring prometheus-server 19091:80
+    "$py" eval/single_detection.py --retest-report "$2" --trial "$3"
+    exit $?
+fi
 if [[ "$mode" == run ]]; then
     case "${2:-first-three}" in
         replays|api-timeout|scheduler-stall|controller-lag|etcd-quota)

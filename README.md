@@ -87,6 +87,8 @@ uv run --no-sync --python 3.11 kubeops cases
 
 ## 평가와 테스트
 
+평가 결과: [HTTP 관측 공유 적용 후 100회 평가](docs/evaluations/eks-100-2026-11-24.md) · [회차별 CSV](docs/evaluations/eks-100-2026-11-24.csv) · [22회차 복구 판단 개선과 대안 비교](docs/evaluations/eks-trial22-retest-2026-11-25.md). 11월 24일 기록은 100회차 중 99건의 판정이 완료됐고 1건은 관측 시간 초과다. 별도 재검증은 원본 100회 통계를 바꾸지 않는다.
+
 실행 계획은 클러스터나 모델 호출 없이 확인할 수 있습니다.
 
 ```bash

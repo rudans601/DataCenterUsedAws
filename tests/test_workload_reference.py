@@ -76,6 +76,7 @@ class EnvironmentReferenceTests(unittest.TestCase):
                     row = {"observation_windows": [{"control": []}]}
                     # I/O만 대체하고 실제 평가기의 환경 선택, HTTP 정답 계산, 참조 저장 경로를 통과한다.
                     with patch.multiple(runner, EKS_LAB=env == "eks", prepare=Mock(), rollout=Mock(),
+                                        collect_baseline=lambda row: row.update(baseline={}),
                                         wait_sample=Mock(return_value={}), node_capacity=Mock(),
                                         resource=Mock(return_value={"spec": {"selector": {"app": "api"}}}),
                                         inject=Mock(return_value=nullcontext({})), capture=Mock(return_value=nullcontext()),
